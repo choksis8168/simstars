@@ -1,0 +1,30 @@
+[project]
+name = "moviesim"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "choksis8168", email = "shreya.choksi@yahoo.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.122.0",
+    "elevenlabs>=2.64.0",
+    "pydantic>=2.13.4",
+    "pydub>=0.25.1",
+    "python-dotenv>=1.2.3",
+    "sqlmodel>=0.0.39",
+    "typer>=0.27.1",
+]
+
+[project.scripts]
+moviesim = "moviesim.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
