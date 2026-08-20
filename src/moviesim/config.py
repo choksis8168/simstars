@@ -28,10 +28,15 @@ MIN_CHARACTERS = 3
 MAX_CHARACTERS = 5
 MIN_LOCATIONS = 2
 MAX_LOCATIONS = 4
-MIN_TURN_BUDGET = 15
-MAX_TURN_BUDGET = 25
+MIN_TURN_BUDGET = 24
+MAX_TURN_BUDGET = 38
 MAX_CRITIC_RETRIES = 2
-DIRECTOR_WRAP_UP_WINDOW = 4  # turns remaining before the director is told to steer toward resolution
+DIRECTOR_WRAP_UP_WINDOW = 7  # turns remaining before the director is told to steer toward resolution
+
+# Live-tuning note (2026-08-19): first real run with 15-25 turns and a
+# WRAP_UP_WINDOW of 4 hit turn_budget on all 3 critic attempts, cutting off
+# mid-climax every time - a good scene never got the runway to resolve.
+# Widened both in response; see docs/design.md verification notes.
 
 DATA_ROOT = Path(os.environ.get("MOVIESIM_DATA_ROOT", Path.cwd() / "sessions"))
 DB_PATH = DATA_ROOT / "moviesim.db"

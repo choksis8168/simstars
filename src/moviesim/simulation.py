@@ -162,14 +162,26 @@ class DirectorAgent:
             f"wants={c.hidden_goal}; currently at {state.character_locations[c.name]}"
             for c in self.characters
         )
-        wrap_up = (
-            f"\nOnly {turns_remaining} turns remain in this story - if the "
-            "central conflict hasn't climaxed yet, escalate hard now; if it "
-            "has, steer toward a real resolution beat this turn or next. Do "
-            "not let this end mid-escalation."
-            if turns_remaining <= DIRECTOR_WRAP_UP_WINDOW
-            else ""
-        )
+        final_stretch = max(2, DIRECTOR_WRAP_UP_WINDOW // 2)
+        if turns_remaining <= final_stretch:
+            wrap_up = (
+                f"\nCRITICAL: only {turns_remaining} turns remain. The climax must "
+                "happen now if it hasn't already, and you must actively steer to "
+                "resolution - do not just keep escalating. If a real resolution "
+                "beat has just landed (a decision made, a truth out in the open, "
+                "a line drawn), use the 'cut' action THIS turn rather than risk "
+                "running out of turns first. An ending that lands one beat early "
+                "is far better than one that never lands at all."
+            )
+        elif turns_remaining <= DIRECTOR_WRAP_UP_WINDOW:
+            wrap_up = (
+                f"\nOnly {turns_remaining} turns remain in this story - if the "
+                "central conflict hasn't climaxed yet, escalate hard now so there "
+                "is still room left to resolve it. Do not let this end "
+                "mid-escalation."
+            )
+        else:
+            wrap_up = ""
         note = f"\nProducer's note for this run: {producer_note}" if producer_note else ""
         system = (
             "You are the director of an unscripted dramatic simulation. You do "
