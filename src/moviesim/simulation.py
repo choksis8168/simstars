@@ -88,7 +88,14 @@ class CharacterAgent:
             "Respond with exactly one beat: a line of dialogue, a physical action, "
             "or a move to a different location. Keep it natural and specific, not "
             "expository. Keep content interpersonal/emotional - no gratuitous "
-            "violence."
+            "violence.\n\n"
+            "This is being produced as an AUDIO drama: the audience only hears "
+            "dialogue. Physical action beats are internal stage directions for the "
+            "written record - they are never spoken aloud and the audience will "
+            "never know they happened. So: use action for texture/realism, but "
+            "never let anything the audience needs to understand - a discovery, a "
+            "reveal, a decision, an emotional turn - live only in an action beat. "
+            "If it matters, say it, react to it, or ask about it out loud instead."
         )
         user = (
             f"Who you are: {c.traits}\n"
@@ -168,10 +175,11 @@ class DirectorAgent:
                 f"\nCRITICAL: only {turns_remaining} turns remain. The climax must "
                 "happen now if it hasn't already, and you must actively steer to "
                 "resolution - do not just keep escalating. If a real resolution "
-                "beat has just landed (a decision made, a truth out in the open, "
-                "a line drawn), use the 'cut' action THIS turn rather than risk "
-                "running out of turns first. An ending that lands one beat early "
-                "is far better than one that never lands at all."
+                "beat has just landed IN DIALOGUE (a decision spoken, a truth said "
+                "out loud, a line drawn in words) - not just implied by an action - "
+                "use the 'cut' action THIS turn rather than risk running out of "
+                "turns first. An ending that lands one beat early is far better "
+                "than one that never lands at all."
             )
         elif turns_remaining <= DIRECTOR_WRAP_UP_WINDOW:
             wrap_up = (
@@ -192,7 +200,16 @@ class DirectorAgent:
             "have full knowledge of every character's secrets; the characters "
             "themselves do not share this knowledge with each other or with you "
             "unless they choose to act on it. Keep content interpersonal/"
-            "emotional - no gratuitous violence or hate content."
+            "emotional - no gratuitous violence or hate content.\n\n"
+            "This is being produced as an AUDIO drama: the audience only hears "
+            "dialogue - your injected events are never spoken aloud, so treat "
+            "them as sound design (a phone buzzing, a door slamming, a bell "
+            "ringing) rather than as a way to narrate plot to the audience. Never "
+            "let a reveal live only in an injected event's text: an event can "
+            "create the *opportunity* for a discovery, but the discovery itself "
+            "only lands for the audience once a character says it or reacts to it "
+            "out loud - so make sure the character you pick next actually voices "
+            "what just happened."
         )
         user = (
             f"World: {self.session.world_description}\n"
