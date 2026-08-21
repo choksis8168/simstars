@@ -33,11 +33,15 @@ def _group_scenes(transcript: list[Event]) -> list[Scene]:
     current_events: list[Event] = []
 
     def flush():
-        if current_lines and current_location is not None:
+        # current_location is guaranteed non-None by the time current_lines
+        # is non-empty (see the loop condition below), so this only needs
+        # to guard against an empty transcript.
+        if current_lines:
+            heading = "EVERYWHERE" if current_location == GLOBAL else f"INT. {current_location.upper()}"
             scenes.append(
                 Scene(
                     location=current_location,
-                    heading=f"INT. {current_location.upper()}",
+                    heading=heading,
                     lines=list(current_lines),
                     events=list(current_events),
                 )
@@ -45,7 +49,13 @@ def _group_scenes(transcript: list[Event]) -> list[Scene]:
 
     for event in transcript:
         loc = event.location
-        if loc != GLOBAL and loc != current_location:
+        # Start a new scene on a real location change, or when nothing has
+        # started a scene yet at all - including a leading run of
+        # global-only events, which would otherwise never get flushed
+        # since current_location would stay None forever (a real bug this
+        # guarded against: those events were being silently dropped from
+        # the screenplay, and therefore from the audio).
+        if current_location is None or (loc != GLOBAL and loc != current_location):
             flush()
             current_location = loc
             current_lines = []

@@ -36,7 +36,11 @@ class CharacterSpec:
         self.starting_location = starting_location
 
 
-def new_session(world_description: str, locations: list[str], cast_specs: list[CharacterSpec]) -> Session:
+def _validate_session_input(world_description: str, locations: list[str], cast_specs: list[CharacterSpec]) -> None:
+    """Pulled out of new_session() so guardrail boundaries (exactly
+    MIN/MAX, not just one-off-either-side) can be unit-tested without
+    touching enrichment/production/the DB at all.
+    """
     if not (MIN_CHARACTERS <= len(cast_specs) <= MAX_CHARACTERS):
         raise ValueError(f"Cast must have {MIN_CHARACTERS}-{MAX_CHARACTERS} characters, got {len(cast_specs)}.")
     if not (MIN_LOCATIONS <= len(locations) <= MAX_LOCATIONS):
@@ -44,6 +48,10 @@ def new_session(world_description: str, locations: list[str], cast_specs: list[C
     for spec in cast_specs:
         if spec.starting_location not in locations:
             raise ValueError(f"{spec.name}'s starting location '{spec.starting_location}' isn't one of {locations}.")
+
+
+def new_session(world_description: str, locations: list[str], cast_specs: list[CharacterSpec]) -> Session:
+    _validate_session_input(world_description, locations, cast_specs)
 
     session = Session(world_description=world_description, locations=", ".join(locations))
     characters = [

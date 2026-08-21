@@ -396,6 +396,31 @@ async def _run_preview(
     return state, end_reason
 
 
+def _resolve_round(
+    results: list[tuple[WorldState, EndReason | None]], comparison: dict
+) -> tuple[WorldState, EndReason | None, bool]:
+    """Given the BRANCH_FACTOR preview results and the comparator's verdict,
+    picks the winning (state, end_reason) and whether this round's outcome
+    should stop the round-retry loop. Pulled out of simulate() as a pure
+    function so this decision logic - including the model-drift guard on an
+    out-of-range best_index, and a resolved-but-not-chosen branch being
+    correctly ignored - is unit-testable without the async branch-generation
+    machinery around it.
+
+    Stops (returns should_stop=True) if the winner resolved (a "cut" is
+    authoritative regardless of what still_flat says - resolving is never
+    flat) or if the comparator judged it not flat. Otherwise the caller
+    should re-preview this same segment with `comparison["reasoning"]` fed
+    back as guidance.
+    """
+    best_index = comparison["best_index"]
+    if not (0 <= best_index < len(results)):
+        best_index = 0  # model drift guard
+    winning_state, winning_end_reason = results[best_index]
+    should_stop = winning_end_reason == EndReason.RESOLVED or not comparison["still_flat"]
+    return winning_state, winning_end_reason, should_stop
+
+
 async def simulate(
     session: Session,
     characters: list[Character],
@@ -443,13 +468,9 @@ async def simulate(
             previews_new_events = [s.events[base_count:] for s, _ in results]
 
             comparison = compare_previews(state.events, previews_new_events)
-            best_index = comparison["best_index"]
-            if not (0 <= best_index < len(results)):
-                best_index = 0  # model drift guard
-            winning_state, winning_end_reason = results[best_index]
+            winning_state, winning_end_reason, should_stop = _resolve_round(results, comparison)
 
-            already_resolved = winning_end_reason == EndReason.RESOLVED
-            if already_resolved or not comparison["still_flat"] or round_num == MAX_SEGMENT_ROUNDS - 1:
+            if should_stop or round_num == MAX_SEGMENT_ROUNDS - 1:
                 break
             prior_feedback = comparison["reasoning"]
             total_rerounds += 1

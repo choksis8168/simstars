@@ -15,8 +15,8 @@ from collections import Counter
 
 import pytest
 
-from simstars.models import Character, EndReason, Session
-from simstars.simulation import simulate
+from simstars.models import Character, EndReason, Event, EventType, Session
+from simstars.simulation import CharacterAgent, DirectorAgent, WorldState, _resolve_round, _run_turns, simulate
 
 
 def _session() -> Session:
@@ -38,6 +38,7 @@ class FakeLLM:
         self.direct_calls: list[str] = []  # user prompt text, in call order
         self.cut_from_call_n: int | None = None  # "direct" returns cut once call_count >= this
         self.compare_responses: list[dict] = []  # popped in order; falls back to a default after
+        self.direct_script: list[dict] = []  # exact decisions for successive "direct" calls, popped in order
 
     def __call__(self, *, model, system, user, tool_name, tool_description, input_schema, max_tokens=1024):
         with self.lock:
@@ -48,6 +49,9 @@ class FakeLLM:
         if tool_name == "direct":
             with self.lock:
                 self.direct_calls.append(user)
+                scripted = self.direct_script.pop(0) if self.direct_script else None
+            if scripted is not None:
+                return scripted
             if self.cut_from_call_n is not None and n >= self.cut_from_call_n:
                 return {"action": "cut", "cut_reason": "done"}
             match = re.search(r"- (\S+) \(", user)
@@ -152,3 +156,185 @@ def test_cut_during_linear_finish_ends_simulation_and_keeps_preview_events(small
 
     assert end_reason == EndReason.RESOLVED
     assert len(events) == 2  # the winning preview's 2 turns were committed before the cut
+
+
+def test_multi_segment_simulation_has_no_turn_gaps_or_duplicates(monkeypatch):
+    monkeypatch.setattr("simstars.simulation.SEGMENT_LENGTH", 3)
+    monkeypatch.setattr("simstars.simulation.PREVIEW_LENGTH", 1)
+    monkeypatch.setattr("simstars.simulation.BRANCH_FACTOR", 2)
+    monkeypatch.setattr("simstars.simulation.MAX_SEGMENT_ROUNDS", 1)
+    fake = _patch_llm(monkeypatch)
+    session = _session()
+    characters = [_character("Ana"), _character("Ben")]
+
+    # 8 turns / segment_len 3 spans three segments (3 + 3 + 2)
+    events, end_reason, rounds = asyncio.run(simulate(session, characters, max_turns=8))
+
+    assert end_reason == EndReason.TURN_BUDGET
+    assert len(events) == 8
+    assert [e.index for e in events] == list(range(1, 9))
+
+
+def test_single_turn_simulation_does_not_crash(small_config, monkeypatch):
+    # max_turns(1) is smaller than PREVIEW_LENGTH(2) - preview_len must clip
+    # to fit rather than overrunning the budget.
+    fake = _patch_llm(monkeypatch)
+    session = _session()
+    characters = [_character("Ana"), _character("Ben")]
+
+    events, end_reason, rounds = asyncio.run(simulate(session, characters, max_turns=1))
+
+    assert len(events) == 1
+    assert end_reason == EndReason.TURN_BUDGET
+
+
+def test_repreview_is_bounded_by_max_segment_rounds_when_still_flat_persists(small_config, monkeypatch):
+    fake = _patch_llm(monkeypatch)
+    fake.compare_responses = [
+        {"best_index": 0, "still_flat": True, "reasoning": "flat 1"},
+        {"best_index": 0, "still_flat": True, "reasoning": "flat 2"},  # MAX_SEGMENT_ROUNDS=2: last round regardless
+    ]
+    session = _session()
+    characters = [_character("Ana"), _character("Ben")]
+
+    events, end_reason, rounds = asyncio.run(simulate(session, characters, max_turns=4))
+
+    assert fake.tool_counts["pick_best_continuation"] == 2  # tried exactly 2 rounds, not more
+    assert rounds == 1  # only the round *before* the final one counts as an extra re-preview
+    assert len(events) == 4  # still commits and finishes despite persistent flatness, not stuck
+
+
+# --- _resolve_round: pure per-round winner selection, no concurrency/mocking needed ---
+
+
+def test_resolve_round_falls_back_to_first_candidate_on_out_of_range_index():
+    state_a, state_b = WorldState.initial([]), WorldState.initial([])
+    results = [(state_a, None), (state_b, None)]
+    comparison = {"best_index": 99, "still_flat": False, "reasoning": "model drift"}
+
+    winning_state, winning_end_reason, should_stop = _resolve_round(results, comparison)
+
+    assert winning_state is state_a
+    assert should_stop is True
+
+
+def test_resolve_round_ignores_a_resolved_branch_that_was_not_chosen():
+    resolved_but_unchosen, chosen_and_ongoing = WorldState.initial([]), WorldState.initial([])
+    results = [(resolved_but_unchosen, EndReason.RESOLVED), (chosen_and_ongoing, None)]
+    comparison = {"best_index": 1, "still_flat": False, "reasoning": "candidate 1 is more promising"}
+
+    winning_state, winning_end_reason, should_stop = _resolve_round(results, comparison)
+
+    assert winning_state is chosen_and_ongoing
+    assert winning_end_reason is None
+    assert should_stop is True  # not because it resolved - because it wasn't flagged flat
+
+
+def test_resolve_round_treats_a_resolved_winner_as_authoritative_even_if_flagged_flat():
+    # Nonsensical combination in principle (a comparator shouldn't call a
+    # resolved ending "flat"), but resolution must win regardless - a cut
+    # is never something to keep re-previewing against.
+    state = WorldState.initial([])
+    results = [(state, EndReason.RESOLVED)]
+    comparison = {"best_index": 0, "still_flat": True, "reasoning": "..."}
+
+    _, winning_end_reason, should_stop = _resolve_round(results, comparison)
+
+    assert winning_end_reason == EndReason.RESOLVED
+    assert should_stop is True
+
+
+def test_resolve_round_continues_when_still_flat_and_not_resolved():
+    state = WorldState.initial([])
+    results = [(state, None)]
+    comparison = {"best_index": 0, "still_flat": True, "reasoning": "too tame"}
+
+    _, _, should_stop = _resolve_round(results, comparison)
+
+    assert should_stop is False
+
+
+# --- _run_turns: the mechanical reveal-enforcement backstop, tested directly
+# and synchronously (no concurrency) for precise control over each turn ---
+
+
+def _setup(char_locations: dict[str, str]):
+    session = _session()
+    characters = [_character(name, loc) for name, loc in char_locations.items()]
+    director = DirectorAgent(session, characters)
+    agents = {c.name: CharacterAgent(c, session) for c in characters}
+    state = WorldState.initial(characters)
+    return state, director, agents
+
+
+def test_backstop_forces_a_witnessing_character_after_a_director_event(monkeypatch):
+    fake = FakeLLM()
+    monkeypatch.setattr("simstars.simulation.call_structured", fake)
+    # Cleo is in a different room and must never be eligible for the forced
+    # reaction - only Ana/Ben, who actually witnessed the Kitchen event.
+    state, director, agents = _setup({"Ana": "Kitchen", "Ben": "Kitchen", "Cleo": "Lobby"})
+    fake.direct_script = [
+        {"action": "event", "location": "Kitchen", "content": "phone rings"},
+        {"action": "event", "location": "Kitchen", "content": "phone rings again"},  # director tries another event
+    ]
+
+    end_reason = _run_turns(state, director, agents, start_turn=1, num_turns=2, max_turns=2,
+                             producer_note=None, prior_feedback=None)
+
+    assert end_reason is None
+    assert len(state.events) == 2
+    assert state.events[0].type == EventType.DIRECTOR
+    # backstop overrode the director's second "event" choice into a
+    # character reaction, restricted to witnesses of the first event
+    assert state.events[1].type == EventType.DIALOGUE
+    assert state.events[1].actor in ("Ana", "Ben")
+
+
+def test_backstop_does_not_force_a_reaction_when_no_one_witnessed_the_event(monkeypatch):
+    fake = FakeLLM()
+    monkeypatch.setattr("simstars.simulation.call_structured", fake)
+    # Nobody is in "Storage" - the injected event has no witnesses.
+    state, director, agents = _setup({"Ana": "Kitchen", "Ben": "Lobby"})
+    fake.direct_script = [
+        {"action": "event", "location": "Storage", "content": "a crash echoes"},
+        {"action": "event", "location": "Kitchen", "content": "another noise"},
+    ]
+
+    end_reason = _run_turns(state, director, agents, start_turn=1, num_turns=2, max_turns=2,
+                             producer_note=None, prior_feedback=None)
+
+    assert end_reason is None
+    # backstop had nothing to force to (no witnesses), so the director's
+    # second choice - another event - stands unmodified
+    assert state.events[1].type == EventType.DIRECTOR
+
+
+def test_backstop_treats_a_global_event_as_witnessed_by_everyone(monkeypatch):
+    fake = FakeLLM()
+    monkeypatch.setattr("simstars.simulation.call_structured", fake)
+    state, director, agents = _setup({"Ana": "Kitchen", "Ben": "Lobby"})
+    fake.direct_script = [
+        {"action": "event", "location": "global", "content": "the power goes out"},
+        {"action": "event", "location": "global", "content": "it comes back"},
+    ]
+
+    end_reason = _run_turns(state, director, agents, start_turn=1, num_turns=2, max_turns=2,
+                             producer_note=None, prior_feedback=None)
+
+    assert end_reason is None
+    assert state.events[1].type == EventType.DIALOGUE
+    assert state.events[1].actor in ("Ana", "Ben")  # both are eligible - global reaches everyone
+
+
+def test_unrecognized_character_name_falls_back_instead_of_crashing(monkeypatch):
+    fake = FakeLLM()
+    monkeypatch.setattr("simstars.simulation.call_structured", fake)
+    state, director, agents = _setup({"Ana": "Kitchen"})
+    fake.direct_script = [{"action": "character", "character_name": "NoSuchPerson"}]
+
+    end_reason = _run_turns(state, director, agents, start_turn=1, num_turns=1, max_turns=1,
+                             producer_note=None, prior_feedback=None)
+
+    assert end_reason is None
+    assert len(state.events) == 1
+    assert state.events[0].actor == "Ana"  # fell back to the only real character instead of crashing

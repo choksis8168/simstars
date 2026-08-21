@@ -43,3 +43,61 @@ def test_global_event_stays_in_the_current_scene_rather_than_splitting_it():
 def test_format_line_dialogue_includes_target_aside():
     e = Event(index=1, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="hi", target="Ben")
     assert _format_line(e) == "ANA (to Ben): hi"
+
+
+def test_empty_transcript_produces_no_scenes():
+    assert _group_scenes([]) == []
+
+
+def test_leading_global_event_is_not_dropped():
+    # Regression test: a run of global events before any located event used
+    # to leave `current_location` as None forever, so flush()'s old guard
+    # (`current_location is not None`) meant these events were silently
+    # dropped from the screenplay - and therefore from the audio.
+    events = [
+        Event(index=1, type=EventType.DIRECTOR, actor="director", location=GLOBAL, content="power goes out"),
+        Event(index=2, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="hello?"),
+    ]
+    scenes = _group_scenes(events)
+    total_events = sum(len(s.events) for s in scenes)
+    assert total_events == 2
+    assert any("power goes out" in line for s in scenes for line in s.lines)
+
+
+def test_transcript_of_only_global_events_still_produces_one_scene():
+    events = [
+        Event(index=1, type=EventType.DIRECTOR, actor="director", location=GLOBAL, content="the lights flicker"),
+        Event(index=2, type=EventType.DIRECTOR, actor="director", location=GLOBAL, content="then go dark"),
+    ]
+    scenes = _group_scenes(events)
+    assert len(scenes) == 1
+    assert scenes[0].location == GLOBAL
+    assert scenes[0].heading == "EVERYWHERE"
+    assert len(scenes[0].lines) == 2
+
+
+def test_global_event_after_a_location_change_stays_in_the_new_scene():
+    # Note: a MOVEMENT event's `location` is the character's *origin* (where
+    # the departure is witnessed), not the destination - so the scene only
+    # actually transitions to "Lobby" once a later event is located there.
+    events = [
+        Event(index=1, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="hi"),
+        Event(index=2, type=EventType.MOVEMENT, actor="Ana", location="Kitchen", content="Lobby"),
+        Event(index=3, type=EventType.DIALOGUE, actor="Ana", location="Lobby", content="made it"),
+        Event(index=4, type=EventType.DIRECTOR, actor="director", location=GLOBAL, content="a bell rings"),
+    ]
+    scenes = _group_scenes(events)
+    assert [s.location for s in scenes] == ["Kitchen", "Lobby"]
+    assert any("a bell rings" in line for line in scenes[1].lines)
+
+
+def test_format_line_for_each_event_type():
+    action = Event(index=1, type=EventType.ACTION, actor="Ana", location="Kitchen", content="sighs")
+    movement = Event(index=2, type=EventType.MOVEMENT, actor="Ana", location="Kitchen", content="Lobby")
+    global_event = Event(index=3, type=EventType.DIRECTOR, actor="director", location=GLOBAL, content="thunder")
+    local_event = Event(index=4, type=EventType.DIRECTOR, actor="director", location="Kitchen", content="knock")
+
+    assert _format_line(action) == "[Ana] sighs"
+    assert _format_line(movement) == "[Ana moves to Lobby]"
+    assert _format_line(global_event) == "[EVERYWHERE] thunder"
+    assert _format_line(local_event) == "[EVENT] knock"
