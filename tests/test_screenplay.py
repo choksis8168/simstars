@@ -2,9 +2,9 @@
 without mocking - the cue-adding LLM call (_add_cues) is exercised
 separately via the mocked dry run, not here."""
 
-from moviesim.models import Event, EventType
-from moviesim.screenplay import _format_line, _group_scenes
-from moviesim.simulation import GLOBAL
+from simstars.models import Event, EventType
+from simstars.screenplay import _format_line, _group_scenes
+from simstars.simulation import GLOBAL
 
 
 def test_consecutive_same_location_events_form_one_scene():

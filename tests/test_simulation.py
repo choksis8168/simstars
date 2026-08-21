@@ -2,8 +2,8 @@
 location model: a character only perceives events from its own location,
 except GLOBAL events which everyone perceives regardless."""
 
-from moviesim.models import Character, Event, EventType
-from moviesim.simulation import GLOBAL, WorldState
+from simstars.models import Character, Event, EventType
+from simstars.simulation import GLOBAL, WorldState
 
 
 def _character(name: str, location: str) -> Character:

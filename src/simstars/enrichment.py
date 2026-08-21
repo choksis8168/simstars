@@ -14,9 +14,9 @@ user (see models.Character docstring for the hidden-at-creation-only rule).
 
 from __future__ import annotations
 
-from moviesim.config import ENRICHMENT_MODEL
-from moviesim.llm import call_structured
-from moviesim.models import Character
+from simstars.config import ENRICHMENT_MODEL
+from simstars.llm import call_structured
+from simstars.models import Character
 
 _WORLD_SYSTEM = """You design the hidden dramatic infrastructure for a movie \
 simulation. You never write plot or dialogue yourself - you only invent the \

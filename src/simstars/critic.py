@@ -16,9 +16,9 @@ nudging was tried first and was not reliable enough on its own).
 
 from __future__ import annotations
 
-from moviesim.config import CRITIC_MODEL
-from moviesim.llm import call_structured
-from moviesim.models import EndReason, Event, EventType
+from simstars.config import CRITIC_MODEL
+from simstars.llm import call_structured
+from simstars.models import EndReason, Event, EventType
 
 _SYSTEM = """You are a story editor evaluating a transcript produced by an \
 autonomous multi-agent drama simulation, for an AUDIO-ONLY production. Judge \

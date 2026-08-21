@@ -1,4 +1,4 @@
-# moviesim
+# SimStars
 
 > Create the characters. Set the world. Press play. Watch a movie emerge.
 
@@ -22,7 +22,7 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY and ELEVENLABS_API_KEY
 ## Usage
 
 ```
-uv run moviesim new                          # define characters + world
-uv run moviesim script <session>             # text-only debug run, no ElevenLabs cost
-uv run moviesim play <session> [--note "..."] # full generate -> produce -> release
+uv run simstars new                          # define characters + world
+uv run simstars script <session>             # text-only debug run, no ElevenLabs cost
+uv run simstars play <session> [--note "..."] # full generate -> produce -> release
 ```

@@ -7,10 +7,10 @@ over the whole formatted draft.
 
 from __future__ import annotations
 
-from moviesim.config import CRITIC_MODEL as SCREENPLAY_MODEL  # same tier of judgment call
-from moviesim.llm import call_structured
-from moviesim.models import Event, EventType, Scene, Screenplay
-from moviesim.simulation import GLOBAL
+from simstars.config import CRITIC_MODEL as SCREENPLAY_MODEL  # same tier of judgment call
+from simstars.llm import call_structured
+from simstars.models import Event, EventType, Scene, Screenplay
+from simstars.simulation import GLOBAL
 
 
 def _format_line(event: Event) -> str:

@@ -9,9 +9,9 @@ import json
 import typer
 from rich.console import Console
 
-from moviesim import pipeline
-from moviesim.config import MAX_CHARACTERS, MAX_LOCATIONS, MIN_CHARACTERS, MIN_LOCATIONS
-from moviesim.models import Event, Screenplay
+from simstars import pipeline
+from simstars.config import MAX_CHARACTERS, MAX_LOCATIONS, MIN_CHARACTERS, MIN_LOCATIONS
+from simstars.models import Event, Screenplay
 
 app = typer.Typer(help="Create the characters. Set the world. Press play. Watch a movie emerge.")
 console = Console()
@@ -45,8 +45,8 @@ def new() -> None:
     console.print("\n[dim]Enriching cast and world...[/dim]")
     session = pipeline.new_session(world_description, locations, specs)
     console.print(f"\n[bold green]Session created: {session.id}[/bold green]")
-    console.print(f"Run [bold]moviesim script {session.id}[/bold] to preview the story for free, or")
-    console.print(f"[bold]moviesim play {session.id}[/bold] to produce the full movie.")
+    console.print(f"Run [bold]simstars script {session.id}[/bold] to preview the story for free, or")
+    console.print(f"[bold]simstars play {session.id}[/bold] to produce the full movie.")
 
 
 def _print_screenplay(events: list[Event], screenplay: Screenplay, end_reason) -> None:

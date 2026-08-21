@@ -4,7 +4,7 @@ new_session, so no mocking is needed."""
 
 import pytest
 
-from moviesim.pipeline import CharacterSpec, new_session
+from simstars.pipeline import CharacterSpec, new_session
 
 
 def _spec(name: str, location: str) -> CharacterSpec:

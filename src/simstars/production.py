@@ -19,8 +19,8 @@ from typing import Callable, TypeVar
 from elevenlabs.client import ElevenLabs
 from pydub import AudioSegment
 
-from moviesim.config import require_elevenlabs_key
-from moviesim.models import Character, EventType, Screenplay
+from simstars.config import require_elevenlabs_key
+from simstars.models import Character, EventType, Screenplay
 
 T = TypeVar("T")
 

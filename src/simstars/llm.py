@@ -10,7 +10,7 @@ from typing import Any
 
 from anthropic import Anthropic
 
-from moviesim.config import require_anthropic_key
+from simstars.config import require_anthropic_key
 
 _client: Anthropic | None = None
 

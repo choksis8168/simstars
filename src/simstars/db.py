@@ -14,7 +14,7 @@ from typing import Iterator
 from sqlmodel import Session as DBSession
 from sqlmodel import SQLModel, create_engine
 
-from moviesim.config import DATA_ROOT, DB_PATH
+from simstars.config import DATA_ROOT, DB_PATH
 
 _engine = None
 

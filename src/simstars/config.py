@@ -38,8 +38,8 @@ DIRECTOR_WRAP_UP_WINDOW = 7  # turns remaining before the director is told to st
 # mid-climax every time - a good scene never got the runway to resolve.
 # Widened both in response; see docs/design.md verification notes.
 
-DATA_ROOT = Path(os.environ.get("MOVIESIM_DATA_ROOT", Path.cwd() / "sessions"))
-DB_PATH = DATA_ROOT / "moviesim.db"
+DATA_ROOT = Path(os.environ.get("SIMSTARS_DATA_ROOT", Path.cwd() / "sessions"))
+DB_PATH = DATA_ROOT / "simstars.db"
 
 
 def require_anthropic_key() -> str:

@@ -13,13 +13,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from moviesim.config import (
+from simstars.config import (
     CHARACTER_MODEL,
     DIRECTOR_MODEL,
     DIRECTOR_WRAP_UP_WINDOW,
 )
-from moviesim.llm import call_structured
-from moviesim.models import Character, EndReason, Event, EventType, Session
+from simstars.llm import call_structured
+from simstars.models import Character, EndReason, Event, EventType, Session
 
 GLOBAL = "global"  # pseudo-location: an event here is witnessed by every character regardless of where they are
 

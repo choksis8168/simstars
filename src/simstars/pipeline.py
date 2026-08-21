@@ -10,8 +10,8 @@ import asyncio
 import json
 import random
 
-from moviesim import production
-from moviesim.config import (
+from simstars import production
+from simstars.config import (
     MAX_CHARACTERS,
     MAX_CRITIC_RETRIES,
     MAX_LOCATIONS,
@@ -20,12 +20,12 @@ from moviesim.config import (
     MIN_LOCATIONS,
     MIN_TURN_BUDGET,
 )
-from moviesim.critic import evaluate
-from moviesim.db import audio_dir, get_session, run_dir
-from moviesim.enrichment import enrich_session
-from moviesim.models import Character, EndReason, Event, Run, Screenplay, Session
-from moviesim.screenplay import build_screenplay
-from moviesim.simulation import simulate
+from simstars.critic import evaluate
+from simstars.db import audio_dir, get_session, run_dir
+from simstars.enrichment import enrich_session
+from simstars.models import Character, EndReason, Event, Run, Screenplay, Session
+from simstars.screenplay import build_screenplay
+from simstars.simulation import simulate
 
 
 class CharacterSpec:
