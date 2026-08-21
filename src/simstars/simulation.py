@@ -109,7 +109,15 @@ class CharacterAgent:
             f"You are currently at: {location}\n"
             f"Also here right now: {', '.join(others_here) or 'no one else'}\n\n"
             f"Everything you have personally witnessed so far:\n{_format_log(state.memory_for(c.name))}\n\n"
-            "What do you do on this beat?"
+            + (
+                "The most recent thing you witnessed was an event, not "
+                "someone speaking. If it's significant to you, this is your "
+                "moment to react out loud - name what you noticed, ask about "
+                "it, confront someone about it. Don't let it pass in silence.\n\n"
+                if state.memory_for(c.name) and state.memory_for(c.name)[-1].type == EventType.DIRECTOR
+                else ""
+            )
+            + "What do you do on this beat?"
         )
         result = call_structured(
             model=CHARACTER_MODEL,
@@ -204,12 +212,17 @@ class DirectorAgent:
             "This is being produced as an AUDIO drama: the audience only hears "
             "dialogue - your injected events are never spoken aloud, so treat "
             "them as sound design (a phone buzzing, a door slamming, a bell "
-            "ringing) rather than as a way to narrate plot to the audience. Never "
-            "let a reveal live only in an injected event's text: an event can "
-            "create the *opportunity* for a discovery, but the discovery itself "
-            "only lands for the audience once a character says it or reacts to it "
-            "out loud - so make sure the character you pick next actually voices "
-            "what just happened."
+            "ringing) rather than as a way to narrate plot to the audience.\n\n"
+            "STRICT RULE: an injected event's content may describe a sensory "
+            "trigger (a phone buzzing, an envelope sliding into view, a knock) "
+            "but must NEVER itself spell out the payload of a reveal - no "
+            "caller ID names, no letterhead text, no read-aloud document "
+            "contents, nothing a character hasn't actually said yet. That "
+            "specific information must not exist anywhere in the transcript "
+            "until a character speaks it. If you want a phone call to reveal "
+            "who's calling, the event is just 'the phone rings' - the caller's "
+            "identity only becomes real once a character reads it and says it "
+            "out loud on a later turn."
         )
         user = (
             f"World: {self.session.world_description}\n"
@@ -275,6 +288,32 @@ def simulate(
         turns_remaining = max_turns - turn + 1
         decision = director.decide_turn(state, turn, turns_remaining, producer_note)
         action = decision["action"]
+
+        # Mechanical backstop for the reveals-only-in-unvoiced-events failure
+        # mode (see docs/design.md verification notes): prompting the director
+        # to always follow an injected event with a character reacting in
+        # dialogue was not reliable on its own across live testing. If the
+        # previous beat was a director-injected event, force this turn to be
+        # a witnessing character, regardless of what the model chose - it
+        # doesn't guarantee *what* they say, but it guarantees someone gets
+        # the chance to voice the reveal right away instead of the director
+        # wandering off into unrelated business.
+        last_event = state.events[-1] if state.events else None
+        if last_event is not None and last_event.type == EventType.DIRECTOR and action != "character":
+            witnesses = (
+                list(state.character_locations)
+                if last_event.location == GLOBAL
+                else state.present_at(last_event.location)
+            )
+            if witnesses:
+                action = "character"
+                decision = {
+                    "action": "character",
+                    "character_name": min(
+                        witnesses,
+                        key=lambda n: max((e.index for e in state.events if e.actor == n), default=0),
+                    ),
+                }
 
         if action == "cut":
             return state.events, EndReason.RESOLVED
