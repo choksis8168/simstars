@@ -11,13 +11,19 @@ possible as a conflict source, not just clashing goals.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from simstars.config import (
+    BRANCH_FACTOR,
     CHARACTER_MODEL,
     DIRECTOR_MODEL,
     DIRECTOR_WRAP_UP_WINDOW,
+    MAX_SEGMENT_ROUNDS,
+    PREVIEW_LENGTH,
+    SEGMENT_LENGTH,
 )
+from simstars.critic import compare_previews
 from simstars.llm import call_structured
 from simstars.models import Character, EndReason, Event, EventType, Session
 
@@ -42,6 +48,18 @@ class WorldState:
 
     def memory_for(self, name: str) -> list[Event]:
         return self._memories[name]
+
+    def clone(self) -> "WorldState":
+        """Cheap clone for branch previews: shallow-copy the containers so
+        appending to a clone's event/memory lists never affects the
+        original. `Event` objects themselves are never mutated after
+        creation, so sharing references to them across clones is safe.
+        """
+        return WorldState(
+            character_locations=dict(self.character_locations),
+            events=list(self.events),
+            _memories={name: list(events) for name, events in self._memories.items()},
+        )
 
     def present_at(self, location: str) -> list[str]:
         return [name for name, loc in self.character_locations.items() if loc == location]
@@ -171,6 +189,7 @@ class DirectorAgent:
         turn_index: int,
         turns_remaining: int,
         producer_note: str | None,
+        prior_feedback: str | None = None,
     ) -> dict:
         cast_summary = "\n".join(
             f"- {c.name} ({c.role}): secret={c.secret}; wound={c.wound}; "
@@ -199,6 +218,12 @@ class DirectorAgent:
         else:
             wrap_up = ""
         note = f"\nProducer's note for this run: {producer_note}" if producer_note else ""
+        feedback = (
+            f"\nA previous attempt at this exact stretch of story stalled: "
+            f"{prior_feedback}\nDo not repeat that - force real movement this time."
+            if prior_feedback
+            else ""
+        )
         system = (
             "You are the director of an unscripted dramatic simulation. You do "
             "not write dialogue yourself except when injecting an event. Your "
@@ -231,7 +256,7 @@ class DirectorAgent:
             f"Cast (full knowledge, including hidden material):\n{cast_summary}\n\n"
             f"Full transcript so far (turn {turn_index} of this run, "
             f"{turns_remaining} turns remaining):\n{_format_log(state.events)}"
-            f"{wrap_up}{note}\n\n"
+            f"{wrap_up}{note}{feedback}\n\n"
             "Decide this turn: let a specific character act, inject an event "
             "yourself, or (only if the story has genuinely reached a resolution) "
             "cut."
@@ -274,19 +299,25 @@ class DirectorAgent:
         )
 
 
-def simulate(
-    session: Session,
-    characters: list[Character],
+def _run_turns(
+    state: WorldState,
+    director: DirectorAgent,
+    agents: dict[str, "CharacterAgent"],
+    start_turn: int,
+    num_turns: int,
     max_turns: int,
-    producer_note: str | None = None,
-) -> tuple[list[Event], EndReason]:
-    state = WorldState.initial(characters)
-    director = DirectorAgent(session, characters)
-    agents = {c.name: CharacterAgent(c, session) for c in characters}
-
-    for turn in range(1, max_turns + 1):
+    producer_note: str | None,
+    prior_feedback: str | None,
+) -> EndReason | None:
+    """Runs up to `num_turns` turns starting at `start_turn` against `state`
+    IN PLACE. Returns EndReason.RESOLVED if the director cut during this
+    stretch, else None (the stretch just ran its course). Used both for
+    short branch previews and for finishing a segment linearly after a
+    preview wins - see `simulate()`.
+    """
+    for turn in range(start_turn, min(start_turn + num_turns, max_turns + 1)):
         turns_remaining = max_turns - turn + 1
-        decision = director.decide_turn(state, turn, turns_remaining, producer_note)
+        decision = director.decide_turn(state, turn, turns_remaining, producer_note, prior_feedback)
         action = decision["action"]
 
         # Mechanical backstop for the reveals-only-in-unvoiced-events failure
@@ -316,7 +347,7 @@ def simulate(
                 }
 
         if action == "cut":
-            return state.events, EndReason.RESOLVED
+            return EndReason.RESOLVED
 
         if action == "character":
             name = decision.get("character_name")
@@ -340,4 +371,102 @@ def simulate(
 
         state.apply_event(event)
 
-    return state.events, EndReason.TURN_BUDGET
+    return None
+
+
+async def _run_preview(
+    state: WorldState,
+    director: DirectorAgent,
+    agents: dict[str, "CharacterAgent"],
+    start_turn: int,
+    num_turns: int,
+    max_turns: int,
+    producer_note: str | None,
+    prior_feedback: str | None,
+) -> tuple[WorldState, EndReason | None]:
+    """Runs a short branch preview in a thread (the underlying Anthropic
+    calls are synchronous; `asyncio.to_thread` is the same pattern
+    production.py already uses to parallelize synchronous SDK calls).
+    Operates on `state`, which the caller must have already cloned - each
+    preview gets its own independent WorldState.
+    """
+    end_reason = await asyncio.to_thread(
+        _run_turns, state, director, agents, start_turn, num_turns, max_turns, producer_note, prior_feedback
+    )
+    return state, end_reason
+
+
+async def simulate(
+    session: Session,
+    characters: list[Character],
+    max_turns: int,
+    producer_note: str | None = None,
+) -> tuple[list[Event], EndReason, int]:
+    """GENERATE phase, structured as branching lookahead over segments (see
+    docs/design.md follow-on plan "Story-Quality Variance Fix"): the turn
+    budget is grouped into segments; at each segment boundary BRANCH_FACTOR
+    short previews (PREVIEW_LENGTH turns) are generated in parallel from the
+    same committed state, a comparative evaluator picks the most
+    dramatically promising one, and only the winner is carried forward -
+    the rest are discarded. This catches a story going flat locally, before
+    it derails the whole run, rather than only judging the finished
+    transcript after the fact.
+
+    Returns (events, end_reason, branch_rounds_used) - the extra int is how
+    many times a segment needed a re-preview round because even the best
+    candidate was still judged flat (observability signal persisted on Run).
+    """
+    state = WorldState.initial(characters)
+    director = DirectorAgent(session, characters)
+    agents = {c.name: CharacterAgent(c, session) for c in characters}
+
+    turn = 1
+    total_rerounds = 0
+
+    while turn <= max_turns:
+        segment_len = min(SEGMENT_LENGTH, max_turns - turn + 1)
+        preview_len = min(PREVIEW_LENGTH, segment_len)
+
+        prior_feedback: str | None = None
+        winning_state: WorldState | None = None
+        winning_end_reason: EndReason | None = None
+
+        for round_num in range(MAX_SEGMENT_ROUNDS):
+            base_count = len(state.events)
+            clones = [state.clone() for _ in range(BRANCH_FACTOR)]
+            results = await asyncio.gather(
+                *[
+                    _run_preview(clone, director, agents, turn, preview_len, max_turns, producer_note, prior_feedback)
+                    for clone in clones
+                ]
+            )
+            previews_new_events = [s.events[base_count:] for s, _ in results]
+
+            comparison = compare_previews(state.events, previews_new_events)
+            best_index = comparison["best_index"]
+            if not (0 <= best_index < len(results)):
+                best_index = 0  # model drift guard
+            winning_state, winning_end_reason = results[best_index]
+
+            already_resolved = winning_end_reason == EndReason.RESOLVED
+            if already_resolved or not comparison["still_flat"] or round_num == MAX_SEGMENT_ROUNDS - 1:
+                break
+            prior_feedback = comparison["reasoning"]
+            total_rerounds += 1
+
+        state = winning_state
+
+        if winning_end_reason == EndReason.RESOLVED:
+            return state.events, EndReason.RESOLVED, total_rerounds
+
+        remaining = segment_len - preview_len
+        if remaining > 0:
+            end_reason = await asyncio.to_thread(
+                _run_turns, state, director, agents, turn + preview_len, remaining, max_turns, producer_note, None
+            )
+            if end_reason == EndReason.RESOLVED:
+                return state.events, EndReason.RESOLVED, total_rerounds
+
+        turn += segment_len
+
+    return state.events, EndReason.TURN_BUDGET, total_rerounds

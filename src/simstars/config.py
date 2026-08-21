@@ -38,6 +38,19 @@ DIRECTOR_WRAP_UP_WINDOW = 7  # turns remaining before the director is told to st
 # mid-climax every time - a good scene never got the runway to resolve.
 # Widened both in response; see docs/design.md verification notes.
 
+# Branching lookahead (story-quality variance fix - see plan follow-on
+# section). The turn budget is grouped into segments; at each segment
+# boundary BRANCH_FACTOR short previews are generated in parallel and the
+# most dramatically promising one is committed, rather than committing to
+# one linear path and only judging it after the fact. Previewing only
+# PREVIEW_LENGTH turns (not the full segment) before comparing keeps this
+# at ~1.7x baseline generation cost instead of ~3x for full-segment
+# branching - see docs/design.md follow-on plan for the cost comparison.
+SEGMENT_LENGTH = 6
+BRANCH_FACTOR = 3
+PREVIEW_LENGTH = 2
+MAX_SEGMENT_ROUNDS = 2  # re-preview attempts per segment if even the best candidate is still flat
+
 DATA_ROOT = Path(os.environ.get("SIMSTARS_DATA_ROOT", Path.cwd() / "sessions"))
 DB_PATH = DATA_ROOT / "simstars.db"
 

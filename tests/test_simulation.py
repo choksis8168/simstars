@@ -66,3 +66,43 @@ def test_character_does_not_retroactively_witness_events_before_arriving():
     state.apply_event(move)
 
     assert lobby_event not in state.memory_for("Ana")
+
+
+def test_clone_mutation_does_not_affect_the_original():
+    ana = _character("Ana", "Kitchen")
+    ben = _character("Ben", "Lobby")
+    state = WorldState.initial([ana, ben])
+    original_event = Event(index=1, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="hi")
+    state.apply_event(original_event)
+
+    clone = state.clone()
+    clone_event = Event(index=2, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="only on the clone")
+    clone.apply_event(clone_event)
+    move = Event(index=3, type=EventType.MOVEMENT, actor="Ben", location="Lobby", content="Kitchen")
+    clone.apply_event(move)
+
+    # the clone diverged...
+    assert clone_event in clone.events
+    assert clone.character_locations["Ben"] == "Kitchen"
+
+    # ...but the original is untouched
+    assert clone_event not in state.events
+    assert state.events == [original_event]
+    assert state.character_locations["Ben"] == "Lobby"
+    assert clone_event not in state.memory_for("Ana")
+
+
+def test_clone_is_independent_starting_point_for_divergent_branches():
+    ana = _character("Ana", "Kitchen")
+    state = WorldState.initial([ana])
+    state.apply_event(Event(index=1, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="shared"))
+
+    branch_a = state.clone()
+    branch_b = state.clone()
+    branch_a.apply_event(Event(index=2, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="branch A"))
+    branch_b.apply_event(Event(index=2, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="branch B"))
+
+    assert len(branch_a.events) == 2
+    assert len(branch_b.events) == 2
+    assert branch_a.events[-1].content == "branch A"
+    assert branch_b.events[-1].content == "branch B"

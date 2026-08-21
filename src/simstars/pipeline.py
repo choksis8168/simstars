@@ -90,6 +90,43 @@ def _load_session(session_id: str) -> tuple[Session, list[Character]]:
         return session, characters
 
 
+Attempt = tuple[list[Event], EndReason, dict, int]  # (events, end_reason, grade, branch_rounds_used)
+
+
+def _score_grade(grade: dict) -> int:
+    return sum(
+        [
+            grade["has_real_conflict"],
+            grade["has_escalation"],
+            grade["has_resolution"],
+            grade["dialogue_carries_the_story"],
+        ]
+    )
+
+
+def _select_best_attempt(attempts_data: list[Attempt]) -> Attempt:
+    """Ships attempts_data[-1] if it passed (the loop in generate() only
+    ever exits on a pass or on exhaustion, so a passing last attempt means
+    that's the one that passed). Otherwise every attempt failed the critic:
+    ship whichever scored highest on the critic's own criteria, ties broken
+    toward the later attempt (later attempts had the benefit of
+    prior-attempt feedback - see simulate()'s prior_feedback threading).
+    This replaces the previous behavior of always shipping whichever
+    attempt merely ran *last* regardless of how it scored.
+    """
+    if attempts_data[-1][2]["passes"]:
+        return attempts_data[-1]
+
+    best = attempts_data[0]
+    best_score = _score_grade(best[2])
+    for candidate in attempts_data[1:]:
+        score = _score_grade(candidate[2])
+        if score >= best_score:
+            best = candidate
+            best_score = score
+    return best
+
+
 def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, list[Event], Screenplay]:
     """GENERATE phase only: simulate -> critic (with reroll) -> screenplay.
     Persists the Run with transcript/screenplay filled in, no audio yet.
@@ -97,22 +134,24 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
     """
     session, characters = _load_session(session_id)
 
-    best_events: list[Event] | None = None
-    best_end_reason: EndReason | None = None
+    # Every attempt is kept, not just the last one - see docs/design.md
+    # follow-on plan: the previous version of this loop only ever shipped
+    # whichever attempt ran *last* on exhaustion, not whichever actually
+    # scored best. See _select_best_attempt().
+    attempts_data: list[Attempt] = []
     attempts = 0
 
     while True:
         turn_budget = random.randint(MIN_TURN_BUDGET, MAX_TURN_BUDGET)
-        events, end_reason = simulate(session, characters, turn_budget, producer_note)
+        events, end_reason, rounds_used = asyncio.run(simulate(session, characters, turn_budget, producer_note))
         attempts += 1
         grade = evaluate(events, end_reason)
-
-        if best_events is None:
-            best_events, best_end_reason = events, end_reason
+        attempts_data.append((events, end_reason, grade, rounds_used))
 
         if grade["passes"] or attempts > MAX_CRITIC_RETRIES:
-            best_events, best_end_reason = events, end_reason
             break
+
+    best_events, best_end_reason, best_grade, best_rounds = _select_best_attempt(attempts_data)
 
     screenplay = build_screenplay(best_events)
 
@@ -121,6 +160,8 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
         producer_note=producer_note,
         end_reason=best_end_reason,
         critic_attempts=attempts,
+        critic_reasoning=best_grade.get("reasoning"),
+        branch_rounds_used=best_rounds,
         transcript_json=json.dumps([e.model_dump(mode="json") for e in best_events]),
         screenplay_json=screenplay.model_dump_json(),
     )

@@ -95,6 +95,8 @@ class Run(SQLModel, table=True):
     producer_note: Optional[str] = None
     end_reason: Optional[EndReason] = None
     critic_attempts: int = 0
+    critic_reasoning: Optional[str] = None  # reasoning from the winning attempt's grade - debugging visibility
+    branch_rounds_used: int = 0  # total re-preview rounds across all segments (see simulation.simulate)
 
     # persisted before production starts, so a production failure never
     # loses the (expensive) simulation result

@@ -1,17 +1,21 @@
 """Critic pass: because generation isn't live, it can afford to grade its
-own work before spending anything on audio. Scores the finished transcript
-against story-shape criteria; the caller (pipeline.py) rerolls the whole
-simulation on failure, bounded by MAX_CRITIC_RETRIES, then ships the best
-attempt regardless.
+own work before spending anything on audio. `evaluate()` scores a finished
+transcript against story-shape criteria; the caller (pipeline.py) rerolls
+the whole simulation on failure, bounded by MAX_CRITIC_RETRIES, then ships
+the best-scoring attempt. `compare_previews()` is the finer-grained sibling
+used by the branching lookahead in simulation.py: rather than judging a
+finished story after the fact, it picks the most dramatically promising of
+several short candidate continuations from the same point, before any of
+them is committed to.
 
 Includes an audio-specific check: only `dialogue` events are ever voiced in
 production (see production.py) - action/director-injected events are
 unspoken stage directions. A transcript can look complete on the page while
-its key reveals only ever land in unvoiced action text. The critic is given
-the dialogue-only track alongside the full transcript specifically to catch
-that failure mode and reroll on it, rather than relying solely on the
-generation-time prompt nudges (docs/design.md verification notes: prompt-only
-nudging was tried first and was not reliable enough on its own).
+its key reveals only ever land in unvoiced action text. Both functions are
+given the dialogue-only track alongside the full transcript specifically to
+catch that failure mode, rather than relying solely on the generation-time
+prompt nudges (docs/design.md verification notes: prompt-only nudging was
+tried first and was not reliable enough on its own).
 """
 
 from __future__ import annotations
@@ -34,6 +38,20 @@ transcript is never actually spoken by a character in the dialogue-only \
 extract, the audience will miss it entirely. That is a failure, even if \
 the full transcript reads well on the page."""
 
+_COMPARE_SYSTEM = """You are a story editor comparing several short candidate \
+continuations of an in-progress autonomous drama simulation, for an \
+AUDIO-ONLY production - only dialogue is ever voiced, so judge each \
+candidate primarily on what it actually says out loud, not on unspoken \
+action description. Pick whichever candidate most effectively advances real \
+dramatic conflict: raises tension, pursues a hidden goal, forces something \
+into the open, deepens a rift - rather than staying comfortable, marking \
+time with routine business, or resolving too easily. Be strict: if every \
+candidate is equally flat, say so."""
+
+
+def _full_log(events: list[Event]) -> str:
+    return "\n".join(f"[{e.index}] ({e.location}) {e.actor}: {e.content}" for e in events)
+
 
 def _dialogue_only_log(transcript: list[Event]) -> str:
     lines = [f"[{e.index}] {e.actor}: {e.content}" for e in transcript if e.type == EventType.DIALOGUE]
@@ -42,7 +60,7 @@ def _dialogue_only_log(transcript: list[Event]) -> str:
 
 def evaluate(transcript: list[Event], end_reason: EndReason) -> dict:
     """Returns {"passes": bool, "reasoning": str, ...}."""
-    full_log = "\n".join(f"[{e.index}] ({e.location}) {e.actor}: {e.content}" for e in transcript)
+    full_log = _full_log(transcript)
     dialogue_log = _dialogue_only_log(transcript)
     user = (
         f"End reason: {end_reason.value} "
@@ -86,5 +104,52 @@ def evaluate(transcript: list[Event], end_reason: EndReason) -> dict:
                 "passes",
                 "reasoning",
             ],
+        },
+    )
+
+
+def compare_previews(context_events: list[Event], previews: list[list[Event]]) -> dict:
+    """Picks the most dramatically promising of several short candidate
+    continuations from the same point in the story. One comparative call
+    across all candidates, rather than independent absolute scores per
+    candidate - cheaper and more reliable than calibrating scores that then
+    have to be compared against each other.
+
+    Returns {"best_index": int, "still_flat": bool, "reasoning": str}.
+    `still_flat` is true if even the best candidate fails to meaningfully
+    advance the story - the caller uses this to trigger one more round of
+    previews with this `reasoning` fed back to the director as feedback.
+    """
+    context_log = _full_log(context_events) if context_events else "(nothing has happened yet)"
+    blocks = []
+    for i, preview in enumerate(previews):
+        blocks.append(
+            f"--- Candidate {i} ---\n"
+            f"Full:\n{_full_log(preview) or '(nothing happened)'}\n"
+            f"Dialogue only (what the audience actually hears):\n{_dialogue_only_log(preview)}"
+        )
+    user = (
+        f"Story so far:\n{context_log}\n\n"
+        f"Here are {len(previews)} candidate continuations from this exact point, each independently "
+        "generated - pick whichever best advances real dramatic conflict.\n\n" + "\n\n".join(blocks)
+    )
+    return call_structured(
+        model=CRITIC_MODEL,
+        system=_COMPARE_SYSTEM,
+        user=user,
+        tool_name="pick_best_continuation",
+        tool_description="Pick which candidate continuation most advances the story, and flag if even the best one is still flat.",
+        max_tokens=1024,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "best_index": {"type": "integer", "description": "0-based index of the best candidate."},
+                "still_flat": {
+                    "type": "boolean",
+                    "description": "True if even the best candidate fails to meaningfully advance conflict.",
+                },
+                "reasoning": {"type": "string"},
+            },
+            "required": ["best_index", "still_flat", "reasoning"],
         },
     )
