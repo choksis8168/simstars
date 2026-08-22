@@ -8,35 +8,46 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-SimStars: an MVP CLI prototype where a user defines characters and a world, and autonomous
-character agents (hidden goals, memory, only-what-they've-witnessed knowledge) simulate a
-self-contained dramatic story inside it — no plot required from the user. A director agent
-biases pacing toward real dramatic shape, a critic pass checks the result actually has one, and
-a production pipeline turns the finished script into a voiced, scored audio movie via
-ElevenLabs. Full design rationale (including why each piece exists) lives in `docs/design.md` —
-read it before making non-trivial changes to the simulation/critic/production pipeline.
+SimStars: a user defines characters and a world, and autonomous character agents (hidden goals,
+memory, only-what-they've-witnessed knowledge) simulate a self-contained dramatic story inside
+it — no plot required from the user. A director agent biases pacing toward real dramatic shape,
+a critic pass checks the result actually has one, and a production pipeline turns the finished
+script into a voiced, scored audio movie via ElevenLabs. Full design rationale (including why
+each piece exists) lives in `docs/design.md` — read it before making non-trivial changes to the
+simulation/critic/production pipeline.
+
+**Two callers of the same engine** (`pipeline.py`'s `new_session`/`generate`/`play`, unmodified
+by either): a Typer CLI (`cli.py`) and a React web app (`frontend/` + `api.py`) that's the
+intended way to actually use SimStars — see docs/design.md's web-app plan. The CLI's `serve`
+command starts the backend, which also serves the built frontend; that's the only CLI
+interaction the web-app workflow needs.
 
 ## Commands
 
 ```
 uv sync                                       # install/update dependencies
 cp .env.example .env                          # then fill in ANTHROPIC_API_KEY and ELEVENLABS_API_KEY
+cd frontend && npm install && npm run build   # one-time (or after frontend changes)
 
-uv run simstars new                           # define characters + world, creates a session
-uv run simstars script <session>              # generate + critique only, print transcript. No ElevenLabs cost.
-uv run simstars play <session> [--note "..."] # full generate -> critique -> produce -> release
+uv run simstars serve                         # start the web app: http://127.0.0.1:8000
+uv run simstars new                           # CLI equivalent: define characters + world, creates a session
+uv run simstars script <session>              # CLI equivalent: generate + critique only, print transcript. No ElevenLabs cost.
+uv run simstars play <session> [--note "..."] # CLI equivalent: full generate -> critique -> produce -> release
 
-uv run pytest                                 # run the full test suite
+uv run pytest                                 # run the full Python test suite
 uv run pytest tests/test_simulation.py        # run one test file
 uv run pytest tests/test_simulation.py::test_character_only_witnesses_events_in_its_own_location  # single test
 uv run pytest -k branching                    # run tests matching a keyword
 ```
 
-No lint/format/type-check tooling is configured in this repo.
+No lint/format/type-check tooling is configured for the Python side. The frontend has no test
+suite (a small local-only app; manual browser verification is the norm - see docs/design.md
+web-app plan's Verification section).
 
-The test suite is all pure-logic/mocked — no test touches a real Anthropic or ElevenLabs API, so
-`uv run pytest` never costs money and never needs `.env` populated. Real API calls only happen
-through the `simstars` CLI commands above.
+The Python test suite is all pure-logic/mocked — no test touches a real Anthropic or ElevenLabs
+API, so `uv run pytest` never costs money and never needs `.env` populated (DB-touching tests use
+the `temp_db` fixture in `tests/conftest.py`, never the real local `sessions/simstars.db`). Real
+API calls only happen through `simstars serve`/the CLI commands above.
 
 ## Architecture
 
@@ -117,6 +128,28 @@ session-creation time only; it's expected and fine for a secret to surface diege
 story is running. Detached-instance gotcha: SQLModel relationships (e.g. `session.characters`)
 must be accessed once while the DB session is still open (see the `len(session.characters)` call
 in `pipeline.new_session`) or they raise `DetachedInstanceError` later.
+
+### Web app (`api.py`, `jobs.py`, `frontend/`)
+
+Single local user, no auth, polling instead of websockets for progress — see docs/design.md's
+web-app plan for the full scoping rationale. `generate`/`play` can take minutes, so
+`POST /api/sessions/{id}/generate|play` hand the pipeline call to a small `ThreadPoolExecutor`
+(`jobs.py`; a task queue would be overkill here) and return a `Job` id immediately;
+`GET /api/jobs/{id}` is what the frontend polls. `POST /api/sessions` (session creation) stays a
+plain blocking call — enrichment/voice-casting is only ~10-30s, tolerable for a spinner.
+
+**Hard rule, not a style preference**: API responses never return SQLModel instances directly —
+hand-written Pydantic response schemas in `api.py` (`CharacterOut`, etc.) explicitly whitelist
+public fields, because `Character.secret`/`.wound`/`.hidden_goal`/`.relationship_seeds` must never
+reach the browser (same hidden-at-creation-time boundary as `models.py`). Returning an ORM object
+directly would leak them via FastAPI's default encoder. `tests/test_api.py` asserts this
+recursively on every session/character response.
+
+`api.py`'s catch-all route serves the built `frontend/dist/` and falls back to `index.html` for
+any unmatched path (so React Router's client-side routes survive a refresh/deep link) - a
+hand-written route, not `StaticFiles(html=True)`, which only handles directory requests, not
+arbitrary SPA paths. `frontend/vite.config.ts`'s dev-server proxy (`/api` -> `:8000`) is a
+dev-only convenience for `npm run dev`; the shipped path is always the FastAPI-served build.
 
 ### Testing conventions
 
