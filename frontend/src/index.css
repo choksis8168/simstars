@@ -142,6 +142,12 @@ legend {
   padding: 0 0.4rem;
 }
 
+.hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 0 0 0.75rem;
+}
+
 .row {
   display: flex;
   gap: 0.5rem;

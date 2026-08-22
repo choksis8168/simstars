@@ -70,3 +70,25 @@ def test_rejects_starting_location_with_different_case_or_whitespace():
     specs = [_spec("A", " L1"), _spec("B", "L1"), _spec("C", "l1")]
     with pytest.raises(ValueError, match="starting location"):
         _validate_session_input("world", ["L1", "L2"], specs)
+
+
+def test_new_session_trims_whitespace_so_dropdown_selection_always_matches(temp_db, monkeypatch):
+    # Regression: the web form's location list gets trimmed before being
+    # sent, but (before this fix) a character's starting_location - set
+    # from a <select> populated with the untrimmed text - didn't, so
+    # "lockers " (from the dropdown) failed to exact-match "lockers" (the
+    # trimmed location list) even though they look identical to a user.
+    # new_session() now trims defensively rather than relying on every
+    # caller to send already-clean strings.
+    import simstars.pipeline as pipeline_module
+    import simstars.production as production
+
+    monkeypatch.setattr(pipeline_module, "enrich_session", lambda world, locations, characters: "stuck")
+    monkeypatch.setattr(production, "cast_voices", lambda characters: None)
+
+    specs = [_spec("A", "lockers "), _spec("B", "lockers"), _spec("C", " class")]
+    session = new_session("  A highschool  ", ["lockers ", "class", "house party"], specs)
+
+    assert session.world_description == "A highschool"
+    assert session.location_list() == ["lockers", "class", "house party"]
+    assert {c.starting_location for c in session.characters} == {"lockers", "class"}

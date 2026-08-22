@@ -26,15 +26,31 @@ export function NewSession() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // The single source of truth for "what locations actually exist" -
+  // derived, not stored, so the dropdown (which assigns starting_location)
+  // and the final submission always agree byte-for-byte. `locations` state
+  // itself stays untrimmed so the text inputs don't fight the user while
+  // they're mid-typing (e.g. typing a name that legitimately has an
+  // internal space).
+  const cleanLocations = locations.map((l) => l.trim()).filter(Boolean)
+
   function updateLocation(index: number, value: string) {
+    // Compare/reassign using trimmed values - the dropdown below always
+    // offers trimmed location names (see cleanLocations), so a character's
+    // starting_location is always a trimmed string; comparing against the
+    // raw (possibly whitespace-padded) previous input here would silently
+    // fail to match and leave that character pointed at a location name
+    // that no longer exists once the untrimmed input is cleaned up on submit.
+    const oldTrimmed = locations[index].trim()
+    const newTrimmed = value.trim()
     const next = [...locations]
-    const oldValue = next[index]
     next[index] = value
     setLocations(next)
-    // keep any character pointed at the old location name pointed at the new one
-    setCharacters((chars) =>
-      chars.map((c) => (c.starting_location === oldValue ? { ...c, starting_location: value } : c)),
-    )
+    if (newTrimmed && oldTrimmed !== newTrimmed) {
+      setCharacters((chars) =>
+        chars.map((c) => (c.starting_location === oldTrimmed ? { ...c, starting_location: newTrimmed } : c)),
+      )
+    }
   }
 
   function addLocation() {
@@ -53,7 +69,7 @@ export function NewSession() {
 
   function addCharacter() {
     if (characters.length >= MAX_CHARACTERS) return
-    setCharacters([...characters, emptyCharacter(locations[0] ?? '')])
+    setCharacters([...characters, emptyCharacter(cleanLocations[0] ?? '')])
   }
 
   function removeCharacter(index: number) {
@@ -67,9 +83,14 @@ export function NewSession() {
     setSubmitting(true)
     try {
       const session = await api.createSession({
-        world_description: worldDescription,
-        locations: locations.map((l) => l.trim()).filter(Boolean),
-        characters,
+        world_description: worldDescription.trim(),
+        locations: cleanLocations,
+        characters: characters.map((c) => ({
+          name: c.name.trim(),
+          role: c.role.trim(),
+          traits: c.traits.trim(),
+          starting_location: c.starting_location.trim(),
+        })),
       })
       navigate(`/sessions/${session.id}`)
     } catch (err) {
@@ -115,6 +136,10 @@ export function NewSession() {
             Cast ({MIN_CHARACTERS}-{MAX_CHARACTERS} characters - a sentence or two per character is enough, the rest
             gets invented)
           </legend>
+          <p className="hint">
+            Role = their social/functional identity ("head cheerleader," "new student"). Traits = personality/vibe -
+            that's where "good girl," "bad boy," etc. belong.
+          </p>
           {characters.map((c, i) => (
             <div className="character-row" key={i}>
               <div className="row">
@@ -128,7 +153,7 @@ export function NewSession() {
                   required
                   value={c.role}
                   onChange={(e) => updateCharacter(i, 'role', e.target.value)}
-                  placeholder="Role"
+                  placeholder="Role (e.g. head cheerleader, new student)"
                 />
                 <select
                   required
@@ -138,7 +163,7 @@ export function NewSession() {
                   <option value="" disabled>
                     Starting location
                   </option>
-                  {locations.filter(Boolean).map((loc) => (
+                  {cleanLocations.map((loc) => (
                     <option key={loc} value={loc}>
                       {loc}
                     </option>

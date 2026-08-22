@@ -53,6 +53,20 @@ def _validate_session_input(world_description: str, locations: list[str], cast_s
 
 
 def new_session(world_description: str, locations: list[str], cast_specs: list[CharacterSpec]) -> Session:
+    # Defensive trim, not just the frontend's job: a stray trailing space
+    # from any caller (this exact bug surfaced live via the web form -
+    # locations got trimmed before being sent but a character's
+    # starting_location didn't, so an exact-match comparison silently
+    # failed) would otherwise produce a confusing "isn't one of [...]"
+    # error even though the strings look identical to a human.
+    world_description = world_description.strip()
+    locations = [loc.strip() for loc in locations]
+    for spec in cast_specs:
+        spec.name = spec.name.strip()
+        spec.role = spec.role.strip()
+        spec.traits = spec.traits.strip()
+        spec.starting_location = spec.starting_location.strip()
+
     _validate_session_input(world_description, locations, cast_specs)
 
     session = Session(world_description=world_description, locations=", ".join(locations))
