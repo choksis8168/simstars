@@ -79,6 +79,30 @@ def play(session_id: str, note: str = typer.Option(None, "--note", help="Produce
     console.print(f"Run: {run.id}  |  End reason: {run.end_reason.value}  |  Critic attempts: {run.critic_attempts}")
 
 
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", help="Interface to bind to."),
+    port: int = typer.Option(8000, help="Port to serve on."),
+    reload: bool = typer.Option(False, help="Auto-reload the backend on code changes (development only)."),
+) -> None:
+    """Start the web app. This is the only CLI command needed for normal
+    use - everything else (creating characters, generating, playing) is a
+    click in the browser once this is running.
+    """
+    import uvicorn
+
+    from simstars.api import _FRONTEND_DIST
+
+    if not _FRONTEND_DIST.is_dir():
+        console.print(
+            "[yellow]Warning:[/yellow] frontend isn't built yet - run "
+            "[bold]npm install && npm run build[/bold] in frontend/ first, "
+            "or the browser will get a 503 for anything but /api routes."
+        )
+    console.print(f"[bold green]Serving on http://{host}:{port}[/bold green]")
+    uvicorn.run("simstars.api:app", host=host, port=port, reload=reload)
+
+
 def main() -> None:
     app()
 

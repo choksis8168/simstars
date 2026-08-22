@@ -10,6 +10,8 @@ import asyncio
 import json
 import random
 
+from sqlmodel import select
+
 from simstars import production
 from simstars.config import (
     MAX_CHARACTERS,
@@ -96,6 +98,36 @@ def _load_session(session_id: str) -> tuple[Session, list[Character]]:
         # detach values we need after the db session closes
         session.locations
         return session, characters
+
+
+def list_sessions() -> list[Session]:
+    """Newest first. Used by the web app's session-list view - no CLI
+    equivalent exists today (the CLI only ever operates on a session id
+    you already have)."""
+    with get_session() as db:
+        sessions = list(db.exec(select(Session).order_by(Session.created_at.desc())).all())
+        for s in sessions:
+            len(s.characters)  # force-load before detaching - see new_session()'s comment
+        return sessions
+
+
+def get_session_detail(session_id: str) -> tuple[Session, list[Character], list[Run]] | None:
+    """Session + its characters + its runs (newest first), or None if the
+    id doesn't exist. Used by the web app's session-detail view."""
+    with get_session() as db:
+        session = db.get(Session, session_id)
+        if session is None:
+            return None
+        characters = list(session.characters)
+        runs = sorted(session.runs, key=lambda r: r.created_at, reverse=True)
+        session.locations  # force-load, same reason as _load_session
+        return session, characters, runs
+
+
+def get_run(run_id: str) -> Run | None:
+    """Used by the web app's run-detail view and its audio-serving route."""
+    with get_session() as db:
+        return db.get(Run, run_id)
 
 
 Attempt = tuple[list[Event], EndReason, dict, int]  # (events, end_reason, grade, branch_rounds_used)

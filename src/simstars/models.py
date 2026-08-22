@@ -35,6 +35,18 @@ class EndReason(str, Enum):
     TURN_BUDGET = "turn_budget"     # hit the hard turn cap without a clean cut
 
 
+class JobKind(str, Enum):
+    GENERATE = "generate"
+    PLAY = "play"
+
+
+class JobStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
 class Character(SQLModel, table=True):
     """User-authored fields are required at creation. The enrichment fields
     are optional and start as None — the enrichment step fills them in
@@ -106,6 +118,23 @@ class Run(SQLModel, table=True):
     final_audio_path: Optional[str] = None
 
     session: Session = Relationship(back_populates="runs")
+
+
+class Job(SQLModel, table=True):
+    """Tracks a background generate/play call so the web app can poll it -
+    see docs/design.md web-app plan "Background jobs". Deliberately not
+    ORM-linked to Session/Run via Relationship() - it's a lightweight
+    tracking row, queried directly by session_id/id, not part of the core
+    domain model the CLI depends on.
+    """
+
+    id: str = Field(default_factory=_id, primary_key=True)
+    session_id: str = Field(foreign_key="session.id", index=True)
+    kind: JobKind
+    status: JobStatus = JobStatus.PENDING
+    error_message: Optional[str] = None
+    result_run_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=_now)
 
 
 # --- Non-persisted, in-memory shapes used during a single simulation run ---
