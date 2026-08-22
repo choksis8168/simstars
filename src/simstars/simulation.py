@@ -24,7 +24,7 @@ from simstars.config import (
     SEGMENT_LENGTH,
 )
 from simstars.critic import compare_previews
-from simstars.llm import call_structured
+from simstars.llm import cached_block, call_structured
 from simstars.models import Character, EndReason, Event, EventType, Session
 
 GLOBAL = "global"  # pseudo-location: an event here is witnessed by every character regardless of where they are
@@ -99,6 +99,9 @@ class CharacterAgent:
         c = self.character
         location = state.character_locations[c.name]
         others_here = [n for n in state.present_at(location) if n != c.name]
+        # Static for this character across every call this run - never
+        # varies once c.name/c.role are set - so it's safe as a cached
+        # block even though it's built fresh each call.
         system = (
             f"You are {c.name}, {c.role}, in an unscripted dramatic simulation. "
             "Stay fully in character. You only know what you have personally "
@@ -115,7 +118,11 @@ class CharacterAgent:
             "reveal, a decision, an emotional turn - live only in an action beat. "
             "If it matters, say it, react to it, or ask about it out loud instead."
         )
-        user = (
+        # Cached block: identity (never changes) + this character's witnessed
+        # memory (append-only - grows by whatever it witnessed since the
+        # last call). Current location/who's-present are kept OUT of this
+        # block since they can change turn to turn as characters move.
+        cacheable_context = (
             f"Who you are: {c.traits}\n"
             f"Your secret (only you know this): {c.secret}\n"
             f"Your wound: {c.wound}\n"
@@ -124,9 +131,11 @@ class CharacterAgent:
             f"World: {self.session.world_description}\n"
             f"Why you can't just leave: {self.session.forcing_mechanic}\n"
             f"All locations: {', '.join(self.session.location_list())}\n\n"
-            f"You are currently at: {location}\n"
+            f"Everything you have personally witnessed so far:\n{_format_log(state.memory_for(c.name))}"
+        )
+        volatile_context = (
+            f"\n\nYou are currently at: {location}\n"
             f"Also here right now: {', '.join(others_here) or 'no one else'}\n\n"
-            f"Everything you have personally witnessed so far:\n{_format_log(state.memory_for(c.name))}\n\n"
             + (
                 "The most recent thing you witnessed was an event, not "
                 "someone speaking. If it's significant to you, this is your "
@@ -139,8 +148,8 @@ class CharacterAgent:
         )
         result = call_structured(
             model=CHARACTER_MODEL,
-            system=system,
-            user=user,
+            system=[cached_block(system)],
+            user=[cached_block(cacheable_context), {"type": "text", "text": volatile_context}],
             tool_name="act",
             tool_description="Take one beat of action as this character.",
             input_schema={
@@ -171,6 +180,33 @@ class CharacterAgent:
             content=result["content"],
             target=result.get("target"),
         )
+
+
+_DIRECTOR_SYSTEM = (
+    "You are the director of an unscripted dramatic simulation. You do "
+    "not write dialogue yourself except when injecting an event. Your "
+    "job is to shape a real story out of autonomous characters: bias "
+    "everything toward dramatic conflict, escalation, and a genuine "
+    "resolution - never let the scene stay comfortable for long. You "
+    "have full knowledge of every character's secrets; the characters "
+    "themselves do not share this knowledge with each other or with you "
+    "unless they choose to act on it. Keep content interpersonal/"
+    "emotional - no gratuitous violence or hate content.\n\n"
+    "This is being produced as an AUDIO drama: the audience only hears "
+    "dialogue - your injected events are never spoken aloud, so treat "
+    "them as sound design (a phone buzzing, a door slamming, a bell "
+    "ringing) rather than as a way to narrate plot to the audience.\n\n"
+    "STRICT RULE: an injected event's content may describe a sensory "
+    "trigger (a phone buzzing, an envelope sliding into view, a knock) "
+    "but must NEVER itself spell out the payload of a reveal - no "
+    "caller ID names, no letterhead text, no read-aloud document "
+    "contents, nothing a character hasn't actually said yet. That "
+    "specific information must not exist anywhere in the transcript "
+    "until a character speaks it. If you want a phone call to reveal "
+    "who's calling, the event is just 'the phone rings' - the caller's "
+    "identity only becomes real once a character reads it and says it "
+    "out loud on a later turn."
+)  # fully static across every call, every session - see cache_control below
 
 
 class DirectorAgent:
@@ -224,38 +260,22 @@ class DirectorAgent:
             if prior_feedback
             else ""
         )
-        system = (
-            "You are the director of an unscripted dramatic simulation. You do "
-            "not write dialogue yourself except when injecting an event. Your "
-            "job is to shape a real story out of autonomous characters: bias "
-            "everything toward dramatic conflict, escalation, and a genuine "
-            "resolution - never let the scene stay comfortable for long. You "
-            "have full knowledge of every character's secrets; the characters "
-            "themselves do not share this knowledge with each other or with you "
-            "unless they choose to act on it. Keep content interpersonal/"
-            "emotional - no gratuitous violence or hate content.\n\n"
-            "This is being produced as an AUDIO drama: the audience only hears "
-            "dialogue - your injected events are never spoken aloud, so treat "
-            "them as sound design (a phone buzzing, a door slamming, a bell "
-            "ringing) rather than as a way to narrate plot to the audience.\n\n"
-            "STRICT RULE: an injected event's content may describe a sensory "
-            "trigger (a phone buzzing, an envelope sliding into view, a knock) "
-            "but must NEVER itself spell out the payload of a reveal - no "
-            "caller ID names, no letterhead text, no read-aloud document "
-            "contents, nothing a character hasn't actually said yet. That "
-            "specific information must not exist anywhere in the transcript "
-            "until a character speaks it. If you want a phone call to reveal "
-            "who's calling, the event is just 'the phone rings' - the caller's "
-            "identity only becomes real once a character reads it and says it "
-            "out loud on a later turn."
-        )
-        user = (
+        # Cached block: only world/forcing-mechanic/locations (fixed for the
+        # whole session) and the transcript itself (append-only - grows by
+        # exactly what the previous call didn't have yet). Turn-count and
+        # cast_summary (character *locations* can change turn to turn) are
+        # kept OUT of this block and appended after, uncached - mixing
+        # per-call-varying text into the cached prefix would invalidate the
+        # cache on every single call instead of extending it.
+        cacheable_context = (
             f"World: {self.session.world_description}\n"
             f"Forcing mechanic: {self.session.forcing_mechanic}\n"
             f"Locations: {', '.join(self.session.location_list())}\n\n"
-            f"Cast (full knowledge, including hidden material):\n{cast_summary}\n\n"
-            f"Full transcript so far (turn {turn_index} of this run, "
-            f"{turns_remaining} turns remaining):\n{_format_log(state.events)}"
+            f"Full transcript so far:\n{_format_log(state.events)}"
+        )
+        volatile_context = (
+            f"\n\n(turn {turn_index} of this run, {turns_remaining} turns remaining)\n\n"
+            f"Cast (full knowledge, including hidden material):\n{cast_summary}"
             f"{wrap_up}{note}{feedback}\n\n"
             "Decide this turn: let a specific character act, inject an event "
             "yourself, or (only if the story has genuinely reached a resolution) "
@@ -263,8 +283,8 @@ class DirectorAgent:
         )
         return call_structured(
             model=DIRECTOR_MODEL,
-            system=system,
-            user=user,
+            system=[cached_block(_DIRECTOR_SYSTEM)],
+            user=[cached_block(cacheable_context), {"type": "text", "text": volatile_context}],
             tool_name="direct",
             tool_description="Decide what happens on this turn of the simulation.",
             max_tokens=1024,

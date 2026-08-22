@@ -21,7 +21,7 @@ tried first and was not reliable enough on its own).
 from __future__ import annotations
 
 from simstars.config import CRITIC_MODEL
-from simstars.llm import call_structured
+from simstars.llm import cached_block, call_structured
 from simstars.models import EndReason, Event, EventType
 
 _SYSTEM = """You are a story editor evaluating a transcript produced by an \
@@ -75,7 +75,7 @@ def evaluate(transcript: list[Event], end_reason: EndReason) -> dict:
     )
     return call_structured(
         model=CRITIC_MODEL,
-        system=_SYSTEM,
+        system=[cached_block(_SYSTEM)],
         user=user,
         tool_name="grade_story",
         tool_description="Grade whether the transcript has a genuine dramatic shape that the audio alone will actually convey.",
@@ -121,6 +121,12 @@ def compare_previews(context_events: list[Event], previews: list[list[Event]]) -
     previews with this `reasoning` fed back to the director as feedback.
     """
     context_log = _full_log(context_events) if context_events else "(nothing has happened yet)"
+    # `context_events` is the transcript committed *before* this segment -
+    # it grows monotonically across segments within one simulate() run
+    # (segment 2's context is a superset of segment 1's), so caching it
+    # gives real incremental savings across the repeated compare_previews
+    # calls in a single run. The candidates themselves are unique to this
+    # round and never reused - kept in the volatile block.
     blocks = []
     for i, preview in enumerate(previews):
         blocks.append(
@@ -128,15 +134,14 @@ def compare_previews(context_events: list[Event], previews: list[list[Event]]) -
             f"Full:\n{_full_log(preview) or '(nothing happened)'}\n"
             f"Dialogue only (what the audience actually hears):\n{_dialogue_only_log(preview)}"
         )
-    user = (
-        f"Story so far:\n{context_log}\n\n"
-        f"Here are {len(previews)} candidate continuations from this exact point, each independently "
+    volatile_context = (
+        f"\n\nHere are {len(previews)} candidate continuations from this exact point, each independently "
         "generated - pick whichever best advances real dramatic conflict.\n\n" + "\n\n".join(blocks)
     )
     return call_structured(
         model=CRITIC_MODEL,
-        system=_COMPARE_SYSTEM,
-        user=user,
+        system=[cached_block(_COMPARE_SYSTEM)],
+        user=[cached_block(f"Story so far:\n{context_log}"), {"type": "text", "text": volatile_context}],
         tool_name="pick_best_continuation",
         tool_description="Pick which candidate continuation most advances the story, and flag if even the best one is still flat.",
         max_tokens=1024,

@@ -27,6 +27,15 @@ def _character(name: str, location: str = "Kitchen") -> Character:
     return Character(session_id="s1", name=name, role="role", traits="traits", starting_location=location)
 
 
+def _as_text(content) -> str:
+    """system/user may now be a plain string or a list of content blocks
+    (see llm.cached_block) - flatten to plain text for the fixture's string
+    matching, regardless of which shape the caller used."""
+    if isinstance(content, str):
+        return content
+    return "\n".join(block["text"] for block in content)
+
+
 class FakeLLM:
     """Dispatches on tool_name; thread-safe since branch previews call this
     concurrently via asyncio.to_thread."""
@@ -41,6 +50,7 @@ class FakeLLM:
         self.direct_script: list[dict] = []  # exact decisions for successive "direct" calls, popped in order
 
     def __call__(self, *, model, system, user, tool_name, tool_description, input_schema, max_tokens=1024):
+        user_text = _as_text(user)
         with self.lock:
             self.call_count += 1
             n = self.call_count
@@ -48,13 +58,13 @@ class FakeLLM:
 
         if tool_name == "direct":
             with self.lock:
-                self.direct_calls.append(user)
+                self.direct_calls.append(user_text)
                 scripted = self.direct_script.pop(0) if self.direct_script else None
             if scripted is not None:
                 return scripted
             if self.cut_from_call_n is not None and n >= self.cut_from_call_n:
                 return {"action": "cut", "cut_reason": "done"}
-            match = re.search(r"- (\S+) \(", user)
+            match = re.search(r"- (\S+) \(", user_text)
             name = match.group(1) if match else "Unknown"
             return {"action": "character", "character_name": name}
 

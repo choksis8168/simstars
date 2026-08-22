@@ -24,6 +24,12 @@ def get_engine():
     if _engine is None:
         DATA_ROOT.mkdir(parents=True, exist_ok=True)
         _engine = create_engine(f"sqlite:///{DB_PATH}")
+        # create_all() only creates missing TABLES - it never alters an
+        # existing table's columns. There's no migration tooling yet (MVP),
+        # so adding/renaming a model field requires either deleting the
+        # local sessions/simstars.db (loses local test data) or manually
+        # `ALTER TABLE ... ADD COLUMN ...` to bring an existing DB file
+        # up to date - hit this for real once already, see git history.
         SQLModel.metadata.create_all(_engine)
     return _engine
 
