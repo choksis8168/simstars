@@ -176,8 +176,52 @@ def test_get_run_audio_404s_when_file_path_missing(client):
     assert resp.status_code == 404
 
 
-def test_frontend_catchall_503s_when_not_built(client):
-    # frontend/dist won't exist in the test environment - confirms the
-    # helpful-error path rather than an opaque crash.
+def test_frontend_catchall_503s_when_not_built(client, monkeypatch, tmp_path):
+    # Explicitly point at a directory that doesn't exist, rather than
+    # relying on frontend/dist being absent in the test environment - it
+    # may well have actually been built (see test below), so this has to
+    # control the condition directly to mean anything.
+    monkeypatch.setattr("simstars.api._FRONTEND_DIST", tmp_path / "not-built")
     resp = client.get("/some/deep/link")
     assert resp.status_code == 503
+
+
+def test_frontend_catchall_serves_index_html_for_unmatched_paths(client, monkeypatch, tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>fake spa shell</html>")
+    monkeypatch.setattr("simstars.api._FRONTEND_DIST", dist)
+
+    resp = client.get("/sessions/some-deep-link")
+
+    assert resp.status_code == 200
+    assert "fake spa shell" in resp.text
+
+
+def test_frontend_catchall_serves_real_static_files_when_present(client, monkeypatch, tmp_path):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html>shell</html>")
+    (dist / "assets" / "app.js").write_text("console.log('hi')")
+    monkeypatch.setattr("simstars.api._FRONTEND_DIST", dist)
+
+    resp = client.get("/assets/app.js")
+
+    assert resp.status_code == 200
+    assert "console.log" in resp.text
+
+
+def test_frontend_catchall_refuses_path_traversal(client, monkeypatch, tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>shell</html>")
+    secret = tmp_path / "outside_secret.txt"
+    secret.write_text("should never be served")
+    monkeypatch.setattr("simstars.api._FRONTEND_DIST", dist)
+
+    resp = client.get("/../outside_secret.txt")
+
+    # either FastAPI/Starlette normalizes the path itself, or our own
+    # containment check catches it and falls back to index.html - either
+    # way, the secret file's contents must never come back.
+    assert "should never be served" not in resp.text
