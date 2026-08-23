@@ -51,6 +51,17 @@ BRANCH_FACTOR = 3
 PREVIEW_LENGTH = 2
 MAX_SEGMENT_ROUNDS = 2  # re-preview attempts per segment if even the best candidate is still flat
 
+# Live-tuning note (2026-08-22): a real `play` run hit ElevenLabs 429
+# concurrent_limit_exceeded ("maximum of 3 concurrent requests") - a scene
+# with more than 3 dialogue lines/SFX cues fired that many TTS/SFX calls at
+# once with no cap. Kept below the account's actual limit (3), not equal to
+# it, since this only bounds concurrency *within* one produce() call - two
+# `play` jobs running in different threads at the same time (see jobs.py)
+# would each open their own budget and could still combine to exceed 3.
+# Fine for the current single-local-user scope; a real limitation if that
+# scope ever changes.
+MAX_CONCURRENT_ELEVENLABS_CALLS = 2
+
 DATA_ROOT = Path(os.environ.get("SIMSTARS_DATA_ROOT", Path.cwd() / "sessions"))
 DB_PATH = DATA_ROOT / "simstars.db"
 

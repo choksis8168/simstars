@@ -7,11 +7,13 @@ from simstars import jobs, pipeline
 from simstars.models import JobKind, JobStatus, Run
 
 
-def _create_job_row(session_id: str, kind: JobKind):
+def _create_job_row(session_id: str, kind: JobKind, created_at=None):
     from simstars.db import get_session
     from simstars.models import Job
 
     job = Job(session_id=session_id, kind=kind)
+    if created_at is not None:
+        job.created_at = created_at
     with get_session() as db:
         db.add(job)
         db.commit()
@@ -105,3 +107,30 @@ def test_status_passes_through_running_before_terminal_state(temp_db, monkeypatc
     jobs._run_generate(job.id, "session-1", note=None)
 
     assert seen_statuses == [JobStatus.RUNNING, JobStatus.COMPLETE]
+
+
+def test_list_jobs_returns_newest_first_and_scoped_to_the_session(temp_db):
+    # Regression: a failed job's error was previously only ever visible to
+    # whoever was watching the page at the moment it finished - nothing
+    # persisted it anywhere a user could come back and see it later.
+    from datetime import datetime, timedelta, timezone
+
+    base = datetime.now(timezone.utc)
+    older = _create_job_row("session-1", JobKind.GENERATE, created_at=base)
+    newer = _create_job_row("session-1", JobKind.PLAY, created_at=base + timedelta(seconds=10))
+    _create_job_row("other-session", JobKind.GENERATE, created_at=base + timedelta(seconds=20))
+
+    result = jobs.list_jobs("session-1")
+
+    assert [j.id for j in result] == [newer.id, older.id]
+    assert all(j.session_id == "session-1" for j in result)
+
+
+def test_list_jobs_includes_failed_status_and_error(temp_db):
+    job = _create_job_row("session-1", JobKind.PLAY)
+    jobs._set_status(job.id, status=JobStatus.FAILED, error_message="concurrent_limit_exceeded")
+
+    result = jobs.list_jobs("session-1")
+
+    assert result[0].status == JobStatus.FAILED
+    assert result[0].error_message == "concurrent_limit_exceeded"

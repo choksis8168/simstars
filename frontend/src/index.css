@@ -178,6 +178,19 @@ legend {
   font-style: italic;
 }
 
+.job-failed {
+  border-color: #b3261e;
+}
+.job-error {
+  margin: 0.4rem 0 0;
+  font-size: 0.85rem;
+  font-weight: 400;
+  word-break: break-word;
+}
+.job-complete {
+  border-color: #2e6b3e;
+}
+
 .forcing-mechanic {
   color: var(--muted);
   font-style: italic;

@@ -149,6 +149,7 @@ class JobOut(BaseModel):
     status: str
     error_message: Optional[str] = None
     result_run_id: Optional[str] = None
+    created_at: str
 
     @classmethod
     def from_model(cls, j: Job) -> "JobOut":
@@ -159,6 +160,7 @@ class JobOut(BaseModel):
             status=j.status.value,
             error_message=j.error_message,
             result_run_id=j.result_run_id,
+            created_at=j.created_at.isoformat(),
         )
 
 
@@ -210,6 +212,13 @@ def get_job_route(job_id: str) -> JobOut:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return JobOut.from_model(job)
+
+
+@app.get("/api/sessions/{session_id}/jobs", response_model=list[JobOut])
+def list_jobs_route(session_id: str) -> list[JobOut]:
+    if pipeline.get_session_detail(session_id) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return [JobOut.from_model(j) for j in jobs.list_jobs(session_id)]
 
 
 @app.get("/api/runs/{run_id}", response_model=RunOut)

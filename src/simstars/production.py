@@ -19,7 +19,7 @@ from typing import Callable, TypeVar
 from elevenlabs.client import ElevenLabs
 from pydub import AudioSegment
 
-from simstars.config import require_elevenlabs_key
+from simstars.config import MAX_CONCURRENT_ELEVENLABS_CALLS, require_elevenlabs_key
 from simstars.models import Character, EventType, Screenplay
 
 T = TypeVar("T")
@@ -90,7 +90,7 @@ def cast_voices(characters: list[Character]) -> None:
 # --- Per-clip generation (parallelized across a run) ---
 
 
-async def _synthesize_line(text: str, voice_id: str) -> bytes:
+async def _synthesize_line(text: str, voice_id: str, limiter: asyncio.Semaphore) -> bytes:
     client = _get_client()
 
     def call():
@@ -103,10 +103,11 @@ async def _synthesize_line(text: str, voice_id: str) -> bytes:
             )
         )
 
-    return await asyncio.to_thread(_with_retry, call)
+    async with limiter:
+        return await asyncio.to_thread(_with_retry, call)
 
 
-async def _generate_sfx(cue: str) -> bytes:
+async def _generate_sfx(cue: str, limiter: asyncio.Semaphore) -> bytes:
     client = _get_client()
 
     def call():
@@ -118,10 +119,11 @@ async def _generate_sfx(cue: str) -> bytes:
             )
         )
 
-    return await asyncio.to_thread(_with_retry, call)
+    async with limiter:
+        return await asyncio.to_thread(_with_retry, call)
 
 
-async def _generate_music(cue: str, length_ms: int) -> bytes:
+async def _generate_music(cue: str, length_ms: int, limiter: asyncio.Semaphore) -> bytes:
     client = _get_client()
     # Music generations can take a while and are the most likely call to be
     # unavailable on a given account/tier; degrade to silence rather than
@@ -130,7 +132,8 @@ async def _generate_music(cue: str, length_ms: int) -> bytes:
         def call():
             return _collect(client.music.compose(prompt=cue, music_length_ms=length_ms))
 
-        return await asyncio.to_thread(_with_retry, call, attempts=2)
+        async with limiter:
+            return await asyncio.to_thread(_with_retry, call, attempts=2)
     except Exception:  # noqa: BLE001
         return b""
 
@@ -149,14 +152,22 @@ async def produce(
     voice_by_name: dict[str, str],
     out_dir: Path,
 ) -> Path:
+    # Shared across the whole call (not one per gather()) so dialogue and
+    # SFX bursts within a scene both draw from the same budget - see
+    # config.py's MAX_CONCURRENT_ELEVENLABS_CALLS note. Created here, not at
+    # module level: asyncio.Semaphore is bound to the event loop it's
+    # created in, and produce() may run under a fresh asyncio.run() each
+    # call (see pipeline.play()).
+    limiter = asyncio.Semaphore(MAX_CONCURRENT_ELEVENLABS_CALLS)
     scene_segments: list[AudioSegment] = []
 
     for scene_index, scene in enumerate(screenplay.scenes):
-        # dialogue lines, back to back, in parallel
+        # dialogue lines, back to back, throttled to at most
+        # MAX_CONCURRENT_ELEVENLABS_CALLS in flight at once
         dialogue_events = [e for e in scene.events if e.type == EventType.DIALOGUE]
         dialogue_bytes = await asyncio.gather(
             *[
-                _synthesize_line(e.content, voice_by_name.get(e.actor, next(iter(voice_by_name.values()))))
+                _synthesize_line(e.content, voice_by_name.get(e.actor, next(iter(voice_by_name.values()))), limiter)
                 for e in dialogue_events
             ]
         )
@@ -166,8 +177,8 @@ async def produce(
             path.write_bytes(data)
             dialogue_track += _bytes_to_segment(data) + AudioSegment.silent(250)
 
-        # SFX, in parallel, laid at the top of the scene
-        sfx_bytes = await asyncio.gather(*[_generate_sfx(cue) for cue in scene.sfx_cues])
+        # SFX, same throttling, laid at the top of the scene
+        sfx_bytes = await asyncio.gather(*[_generate_sfx(cue, limiter) for cue in scene.sfx_cues])
         sfx_track = AudioSegment.silent(len(dialogue_track))
         for i, data in enumerate(sfx_bytes):
             if data:
@@ -177,7 +188,7 @@ async def produce(
 
         # music, ducked under the whole scene
         if scene.music_cue:
-            music_bytes = await _generate_music(scene.music_cue, len(scene_audio))
+            music_bytes = await _generate_music(scene.music_cue, len(scene_audio), limiter)
             if music_bytes:
                 music_track = _bytes_to_segment(music_bytes) - 18  # dB, ducked under dialogue
                 music_track = music_track[: len(scene_audio)]

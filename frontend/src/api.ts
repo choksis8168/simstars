@@ -55,6 +55,7 @@ export interface JobOut {
   status: JobStatus
   error_message: string | null
   result_run_id: string | null
+  created_at: string
 }
 
 export interface CharacterIn {
@@ -94,6 +95,7 @@ export const api = {
   startPlay: (sessionId: string, note?: string) =>
     request<JobOut>(`/sessions/${sessionId}/play`, { method: 'POST', body: JSON.stringify({ note }) }),
   getJob: (id: string) => request<JobOut>(`/jobs/${id}`),
+  listJobs: (sessionId: string) => request<JobOut[]>(`/sessions/${sessionId}/jobs`),
   getRun: (id: string) => request<RunOut>(`/runs/${id}`),
 }
 

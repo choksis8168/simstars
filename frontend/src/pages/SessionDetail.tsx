@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api, type JobKind, type SessionDetailOut } from '../api'
+import { api, type JobKind, type JobOut, type SessionDetailOut } from '../api'
 import { usePollJob } from '../usePollJob'
 
 export function SessionDetail() {
   const { sessionId } = useParams<{ sessionId: string }>()
   const navigate = useNavigate()
   const [session, setSession] = useState<SessionDetailOut | null>(null)
+  const [recentJobs, setRecentJobs] = useState<JobOut[]>([])
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState('')
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
@@ -15,6 +16,11 @@ export function SessionDetail() {
   const load = useCallback(() => {
     if (!sessionId) return
     api.getSession(sessionId).then(setSession).catch((err) => setError(err.message))
+    // Persists status/errors past the moment they happened, so a failure
+    // (e.g. an API rate limit, insufficient credit) is still visible after
+    // navigating away or reloading, not just while actively watching a
+    // live job's poll result.
+    api.listJobs(sessionId).then(setRecentJobs).catch(() => {})
   }, [sessionId])
 
   useEffect(load, [load])
@@ -41,6 +47,7 @@ export function SessionDetail() {
       const started = kind === 'generate' ? await api.startGenerate(sessionId, note) : await api.startPlay(sessionId, note)
       setActiveJobKind(kind)
       setActiveJobId(started.id)
+      api.listJobs(sessionId).then(setRecentJobs).catch(() => {})
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -93,6 +100,23 @@ export function SessionDetail() {
       )}
       {job?.status === 'failed' && <p className="error">{job.error_message}</p>}
       {error && <p className="error">{error}</p>}
+
+      {recentJobs.length > 0 && (
+        <>
+          <h2>Recent activity</h2>
+          <ul className="card-list">
+            {recentJobs.map((j) => (
+              <li key={j.id} className={`card static job-${j.status}`}>
+                <div className="card-title">
+                  {j.kind === 'generate' ? 'Generate Script' : 'Play Movie'} &middot; {j.status}
+                </div>
+                <div className="card-meta">{new Date(j.created_at).toLocaleString()}</div>
+                {j.status === 'failed' && <p className="error job-error">{j.error_message}</p>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
 
       <h2>Past runs</h2>
       {session.runs.length === 0 && <p>No runs yet.</p>}

@@ -129,6 +129,28 @@ def test_generate_endpoint_submits_a_job_and_returns_it(client, monkeypatch):
     assert submitted["args"] == (session.id, JobKind.GENERATE, "make it tense")
 
 
+def test_list_jobs_route_surfaces_a_failed_job_and_its_error(client):
+    from simstars.models import Job
+
+    session = _seed_session()
+    with get_session() as db:
+        db.add(Job(session_id=session.id, kind=JobKind.PLAY, status=JobStatus.FAILED, error_message="concurrent_limit_exceeded"))
+        db.commit()
+
+    resp = client.get(f"/api/sessions/{session.id}/jobs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["status"] == "failed"
+    assert body[0]["error_message"] == "concurrent_limit_exceeded"
+
+
+def test_list_jobs_route_404s_for_unknown_session(client):
+    resp = client.get("/api/sessions/does-not-exist/jobs")
+    assert resp.status_code == 404
+
+
 def test_get_run_returns_parsed_screenplay_and_audio_url(client):
     session = _seed_session()
     run = Run(

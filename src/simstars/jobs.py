@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 
+from sqlmodel import select
+
 from simstars import pipeline
 from simstars.db import get_session
 from simstars.models import Job, JobKind, JobStatus
@@ -64,6 +66,18 @@ _WORKERS = {
 def get_job(job_id: str) -> Job | None:
     with get_session() as db:
         return db.get(Job, job_id)
+
+
+def list_jobs(session_id: str) -> list[Job]:
+    """Newest first. A completed/failed job's status and error_message
+    were previously only ever visible to whoever was watching the page at
+    the moment it finished - nothing persisted them anywhere else, so a
+    real failure (see config.py's MAX_CONCURRENT_ELEVENLABS_CALLS note) was
+    invisible the moment you navigated away or reloaded. This is what
+    session-detail's "Recent activity" list polls/reads instead.
+    """
+    with get_session() as db:
+        return list(db.exec(select(Job).where(Job.session_id == session_id).order_by(Job.created_at.desc())).all())
 
 
 def submit_job(session_id: str, kind: JobKind, note: str | None = None) -> Job:
