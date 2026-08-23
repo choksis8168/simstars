@@ -197,8 +197,20 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
 
     while True:
         turn_budget = random.randint(MIN_TURN_BUDGET, MAX_TURN_BUDGET)
-        events, end_reason, rounds_used = asyncio.run(simulate(session, characters, turn_budget, producer_note))
         attempts += 1
+        try:
+            events, end_reason, rounds_used = asyncio.run(simulate(session, characters, turn_budget, producer_note))
+        except Exception:
+            # A hard failure (e.g. every branch in some segment failed even
+            # after call_structured's own retries - see llm.py/retry.py)
+            # used to skip this retry loop entirely and fail the whole job
+            # on attempt 1, even though a critic *rejection* gets up to
+            # MAX_CRITIC_RETRIES more tries. Give a hard failure the same
+            # budget rather than treating the two failure modes differently.
+            if attempts > MAX_CRITIC_RETRIES:
+                raise
+            continue
+
         grade = evaluate(events, end_reason)
         attempts_data.append((events, end_reason, grade, rounds_used))
 
@@ -227,13 +239,29 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
     return run, best_events, screenplay
 
 
-def play(session_id: str, producer_note: str | None = None) -> Run:
-    """Full generate -> produce -> release."""
-    session, characters = _load_session(session_id)
-    run, _events, screenplay = generate(session_id, producer_note)
+def produce_run(run_id: str) -> Run:
+    """Runs (or re-runs) just the PRODUCE phase against an already-persisted
+    run's screenplay. This is the recovery path for when production fails
+    after simulation already succeeded: the transcript/screenplay are
+    persisted before production starts specifically so a production
+    failure never loses that (expensive) work (see production.py's module
+    docstring) - but until this function existed, there was no way to
+    actually act on that safety net. The only recovery path was clicking
+    Play Movie again, which re-ran the entire simulation from scratch just
+    to retry a comparatively cheap production step. Also doubles as "turn
+    an existing script I already like into audio" without re-rolling it.
+    """
+    run = get_run(run_id)
+    if run is None:
+        raise ValueError(f"No run '{run_id}'.")
+    if not run.screenplay_json:
+        raise ValueError(f"Run '{run_id}' has no screenplay yet - nothing to produce.")
 
+    _session, characters = _load_session(run.session_id)
     voice_by_name = {c.name: c.voice_id for c in characters if c.voice_id}
-    out_dir = audio_dir(session_id, run.id)
+    screenplay = Screenplay.model_validate_json(run.screenplay_json)
+
+    out_dir = audio_dir(run.session_id, run.id)
     final_path = asyncio.run(production.produce(screenplay, voice_by_name, out_dir))
 
     run.final_audio_path = str(final_path)
@@ -243,3 +271,9 @@ def play(session_id: str, producer_note: str | None = None) -> Run:
         db.refresh(run)
 
     return run
+
+
+def play(session_id: str, producer_note: str | None = None) -> Run:
+    """Full generate -> produce -> release."""
+    run, _events, _screenplay = generate(session_id, producer_note)
+    return produce_run(run.id)

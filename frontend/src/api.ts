@@ -97,6 +97,7 @@ export const api = {
   getJob: (id: string) => request<JobOut>(`/jobs/${id}`),
   listJobs: (sessionId: string) => request<JobOut[]>(`/sessions/${sessionId}/jobs`),
   getRun: (id: string) => request<RunOut>(`/runs/${id}`),
+  startProduce: (runId: string) => request<JobOut>(`/runs/${runId}/produce`, { method: 'POST' }),
 }
 
 export { ApiError }

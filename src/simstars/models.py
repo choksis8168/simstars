@@ -38,6 +38,7 @@ class EndReason(str, Enum):
 class JobKind(str, Enum):
     GENERATE = "generate"
     PLAY = "play"
+    PRODUCE = "produce"  # retry/redo just the PRODUCE phase against an already-persisted run's screenplay
 
 
 class JobStatus(str, Enum):

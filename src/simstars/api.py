@@ -237,6 +237,22 @@ def get_run_audio(run_id: str) -> FileResponse:
     return FileResponse(run.final_audio_path, media_type="audio/mpeg")
 
 
+@app.post("/api/runs/{run_id}/produce", response_model=JobOut)
+def start_produce(run_id: str) -> JobOut:
+    """Retries (or runs for the first time) just the PRODUCE phase against
+    this run's already-persisted screenplay - see pipeline.produce_run().
+    The recovery path when production fails after simulation already
+    succeeded, and also how a `generate`-only run can get audio without
+    re-rolling the story.
+    """
+    run = pipeline.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if not run.screenplay_json:
+        raise HTTPException(status_code=400, detail="This run has no screenplay yet - nothing to produce.")
+    return JobOut.from_model(jobs.submit_produce_job(run_id, run.session_id))
+
+
 # --- static frontend ---
 # A hand-written catch-all rather than StaticFiles(html=True): that option
 # only serves index.html for directory requests, not for arbitrary

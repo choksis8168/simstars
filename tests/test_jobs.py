@@ -134,3 +134,42 @@ def test_list_jobs_includes_failed_status_and_error(temp_db):
 
     assert result[0].status == JobStatus.FAILED
     assert result[0].error_message == "concurrent_limit_exceeded"
+
+
+def test_submit_produce_job_pre_populates_result_run_id(temp_db, monkeypatch):
+    # Unlike generate/play, a produce job's target run is known up front,
+    # not just discovered on completion - see submit_produce_job()'s docstring.
+    monkeypatch.setattr(jobs, "_executor", type("Noop", (), {"submit": staticmethod(lambda *a, **k: None)})())
+
+    job = jobs.submit_produce_job("run-1", "session-1")
+
+    assert job.kind == JobKind.PRODUCE
+    assert job.status == JobStatus.PENDING
+    assert job.result_run_id == "run-1"
+
+
+def test_run_produce_marks_complete_on_success(temp_db, monkeypatch):
+    job = _create_job_row("session-1", JobKind.PRODUCE)
+    fake_run = Run(id="run-1", session_id="session-1", final_audio_path="/tmp/movie.mp3")
+    monkeypatch.setattr(pipeline, "produce_run", lambda run_id: fake_run)
+
+    jobs._run_produce(job.id, "run-1")
+
+    updated = jobs.get_job(job.id)
+    assert updated.status == JobStatus.COMPLETE
+    assert updated.result_run_id == "run-1"
+
+
+def test_run_produce_marks_failed_with_error_message_on_exception(temp_db, monkeypatch):
+    job = _create_job_row("session-1", JobKind.PRODUCE)
+
+    def boom(run_id):
+        raise RuntimeError("concurrent_limit_exceeded")
+
+    monkeypatch.setattr(pipeline, "produce_run", boom)
+
+    jobs._run_produce(job.id, "run-1")
+
+    updated = jobs.get_job(job.id)
+    assert updated.status == JobStatus.FAILED
+    assert updated.error_message == "concurrent_limit_exceeded"

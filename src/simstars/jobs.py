@@ -57,6 +57,16 @@ def _run_play(job_id: str, session_id: str, note: str | None) -> None:
     _set_status(job_id, status=JobStatus.COMPLETE, result_run_id=run.id)
 
 
+def _run_produce(job_id: str, run_id: str) -> None:
+    _set_status(job_id, status=JobStatus.RUNNING)
+    try:
+        run = pipeline.produce_run(run_id)
+    except Exception as exc:  # noqa: BLE001
+        _set_status(job_id, status=JobStatus.FAILED, error_message=str(exc))
+        return
+    _set_status(job_id, status=JobStatus.COMPLETE, result_run_id=run.id)
+
+
 _WORKERS = {
     JobKind.GENERATE: _run_generate,
     JobKind.PLAY: _run_play,
@@ -93,4 +103,21 @@ def submit_job(session_id: str, kind: JobKind, note: str | None = None) -> Job:
         db.refresh(job)
 
     _executor.submit(_WORKERS[kind], job.id, session_id, note)
+    return job
+
+
+def submit_produce_job(run_id: str, session_id: str) -> Job:
+    """Separate from submit_job()'s generic (session_id, kind, note) shape
+    since a PRODUCE job targets a specific existing run, not a fresh
+    simulation - see pipeline.produce_run(). `result_run_id` is known
+    up-front here (it's the run being retried), not just discovered on
+    completion like it is for generate/play.
+    """
+    job = Job(session_id=session_id, kind=JobKind.PRODUCE, result_run_id=run_id)
+    with get_session() as db:
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+
+    _executor.submit(_run_produce, job.id, run_id)
     return job

@@ -198,6 +198,46 @@ def test_get_run_audio_404s_when_file_path_missing(client):
     assert resp.status_code == 404
 
 
+def test_produce_endpoint_submits_a_job_for_a_run_with_a_screenplay(client, monkeypatch):
+    session = _seed_session()
+    run = Run(session_id=session.id, screenplay_json='{"scenes": []}')
+    with get_session() as db:
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+
+    from simstars.models import Job
+
+    def fake_submit_produce_job(run_id, session_id):
+        return Job(id="job-1", session_id=session_id, kind=JobKind.PRODUCE, status=JobStatus.PENDING, result_run_id=run_id)
+
+    monkeypatch.setattr(jobs_module, "submit_produce_job", fake_submit_produce_job)
+
+    resp = client.post(f"/api/runs/{run.id}/produce")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "produce"
+    assert body["result_run_id"] == run.id
+
+
+def test_produce_endpoint_404s_for_unknown_run(client):
+    resp = client.post("/api/runs/does-not-exist/produce")
+    assert resp.status_code == 404
+
+
+def test_produce_endpoint_400s_when_run_has_no_screenplay_yet(client):
+    session = _seed_session()
+    run = Run(session_id=session.id)  # no screenplay_json
+    with get_session() as db:
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+
+    resp = client.post(f"/api/runs/{run.id}/produce")
+    assert resp.status_code == 400
+
+
 def test_frontend_catchall_503s_when_not_built(client, monkeypatch, tmp_path):
     # Explicitly point at a directory that doesn't exist, rather than
     # relying on frontend/dist being absent in the test environment - it
