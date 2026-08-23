@@ -12,17 +12,14 @@ first listenable cut; tightening it is a natural v2 improvement.
 from __future__ import annotations
 
 import asyncio
-import time
 from pathlib import Path
-from typing import Callable, TypeVar
 
 from elevenlabs.client import ElevenLabs
 from pydub import AudioSegment
 
 from simstars.config import MAX_CONCURRENT_ELEVENLABS_CALLS, require_elevenlabs_key
 from simstars.models import Character, EventType, Screenplay
-
-T = TypeVar("T")
+from simstars.retry import with_retry
 
 _client: ElevenLabs | None = None
 
@@ -32,23 +29,6 @@ def _get_client() -> ElevenLabs:
     if _client is None:
         _client = ElevenLabs(api_key=require_elevenlabs_key())
     return _client
-
-
-def _with_retry(fn: Callable[[], T], *, attempts: int = 3, base_delay: float = 1.0) -> T:
-    """Resilience for transient ElevenLabs API failures. The transcript/
-    screenplay are already persisted by the time this runs, so a failure
-    here never loses simulation work - see pipeline.py.
-    """
-    last_error: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            return fn()
-        except Exception as exc:  # noqa: BLE001 - deliberately broad: any transient API failure retries
-            last_error = exc
-            if attempt < attempts - 1:
-                time.sleep(base_delay * (2**attempt))
-    assert last_error is not None
-    raise last_error
 
 
 def _collect(chunks) -> bytes:
@@ -74,7 +54,7 @@ def cast_voices(characters: list[Character]) -> None:
 
         candidates: list[str] = []
         try:
-            result = _with_retry(search)
+            result = with_retry(search)
             candidates = [v.voice_id for v in result.voices]
         except Exception:  # noqa: BLE001 - fall through to the unfiltered library below
             candidates = []
@@ -104,7 +84,7 @@ async def _synthesize_line(text: str, voice_id: str, limiter: asyncio.Semaphore)
         )
 
     async with limiter:
-        return await asyncio.to_thread(_with_retry, call)
+        return await asyncio.to_thread(with_retry, call)
 
 
 async def _generate_sfx(cue: str, limiter: asyncio.Semaphore) -> bytes:
@@ -120,7 +100,7 @@ async def _generate_sfx(cue: str, limiter: asyncio.Semaphore) -> bytes:
         )
 
     async with limiter:
-        return await asyncio.to_thread(_with_retry, call)
+        return await asyncio.to_thread(with_retry, call)
 
 
 async def _generate_music(cue: str, length_ms: int, limiter: asyncio.Semaphore) -> bytes:
@@ -133,7 +113,7 @@ async def _generate_music(cue: str, length_ms: int, limiter: asyncio.Semaphore) 
             return _collect(client.music.compose(prompt=cue, music_length_ms=length_ms))
 
         async with limiter:
-            return await asyncio.to_thread(_with_retry, call, attempts=2)
+            return await asyncio.to_thread(with_retry, call, attempts=2)
     except Exception:  # noqa: BLE001
         return b""
 

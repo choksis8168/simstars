@@ -11,6 +11,13 @@ every single turn with no caching, cost grows faster than linearly as a
 run progresses - a live run was observed making several hundred calls (see
 docs/design.md), and re-transmitting/re-billing an ever-longer transcript
 on each of those calls is the single biggest avoidable cost in that total.
+
+Every call goes through `with_retry` (shared with production.py's
+ElevenLabs calls - see retry.py) - a run can make hundreds of these calls
+over several minutes, and simulation.py's branching previews run several in
+parallel (see its asyncio.gather usage), so without this, one transient
+blip on any single call used to kill the entire multi-hundred-call, several-
+minutes-long, real-money job. See docs/design.md verification notes.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from typing import Any, Union
 from anthropic import Anthropic
 
 from simstars.config import require_anthropic_key
+from simstars.retry import with_retry
 
 _client: Anthropic | None = None
 
@@ -62,20 +70,24 @@ def call_structured(
     accepts both forms for `system` and for a message's `content`.
     """
     client = _get_client()
-    response = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        tools=[
-            {
-                "name": tool_name,
-                "description": tool_description,
-                "input_schema": input_schema,
-            }
-        ],
-        tool_choice={"type": "tool", "name": tool_name},
-    )
+
+    def call():
+        return client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            tools=[
+                {
+                    "name": tool_name,
+                    "description": tool_description,
+                    "input_schema": input_schema,
+                }
+            ],
+            tool_choice={"type": "tool", "name": tool_name},
+        )
+
+    response = with_retry(call)
     for block in response.content:
         if block.type == "tool_use" and block.name == tool_name:
             return block.input

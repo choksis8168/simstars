@@ -16,7 +16,15 @@ from collections import Counter
 import pytest
 
 from simstars.models import Character, EndReason, Event, EventType, Session
-from simstars.simulation import CharacterAgent, DirectorAgent, WorldState, _resolve_round, _run_turns, simulate
+from simstars.simulation import (
+    CharacterAgent,
+    DirectorAgent,
+    WorldState,
+    _partition_preview_results,
+    _resolve_round,
+    _run_turns,
+    simulate,
+)
 
 
 def _session() -> Session:
@@ -60,6 +68,8 @@ class FakeLLM:
             with self.lock:
                 self.direct_calls.append(user_text)
                 scripted = self.direct_script.pop(0) if self.direct_script else None
+            if isinstance(scripted, BaseException):
+                raise scripted
             if scripted is not None:
                 return scripted
             if self.cut_from_call_n is not None and n >= self.cut_from_call_n:
@@ -262,6 +272,65 @@ def test_resolve_round_continues_when_still_flat_and_not_resolved():
     _, _, should_stop = _resolve_round(results, comparison)
 
     assert should_stop is False
+
+
+# --- _partition_preview_results: resilience to a branch failing even after
+# call_structured's own retries (see llm.py/retry.py) - pure, no concurrency ---
+
+
+def test_partition_preview_results_drops_failures_and_keeps_successes():
+    state_a, state_b = WorldState.initial([]), WorldState.initial([])
+    raw = [(state_a, None), RuntimeError("branch 2 failed"), (state_b, None)]
+
+    results = _partition_preview_results(raw)
+
+    assert results == [(state_a, None), (state_b, None)]
+
+
+def test_partition_preview_results_raises_when_every_branch_failed():
+    raw = [RuntimeError("first"), RuntimeError("second")]
+
+    with pytest.raises(RuntimeError, match="All 2 preview branches failed"):
+        _partition_preview_results(raw)
+
+
+def test_partition_preview_results_chains_the_first_failure_as_the_cause():
+    first_error = RuntimeError("first")
+    raw = [first_error, RuntimeError("second")]
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _partition_preview_results(raw)
+
+    assert excinfo.value.__cause__ is first_error
+
+
+# --- Same resilience, exercised end-to-end through simulate() with real
+# concurrency, not just the pure function above ---
+
+
+def test_simulate_tolerates_one_failed_branch_when_others_succeed(small_config, monkeypatch):
+    fake = _patch_llm(monkeypatch)
+    # Exactly one "direct" call raises; with BRANCH_FACTOR=2 previews this
+    # takes down at most one branch, and the round should still complete
+    # using whichever branch(es) succeeded.
+    fake.direct_script = [RuntimeError("simulated persistent failure")]
+    session = _session()
+    characters = [_character("Ana"), _character("Ben")]
+
+    events, end_reason, rounds = asyncio.run(simulate(session, characters, max_turns=4))
+
+    assert end_reason == EndReason.TURN_BUDGET
+    assert len(events) == 4  # completed normally despite the one failed branch
+
+
+def test_simulate_raises_clearly_when_every_branch_in_a_round_fails(small_config, monkeypatch):
+    fake = _patch_llm(monkeypatch)
+    fake.direct_script = [RuntimeError("fail 1"), RuntimeError("fail 2")]  # both BRANCH_FACTOR=2 branches' first calls
+    session = _session()
+    characters = [_character("Ana"), _character("Ben")]
+
+    with pytest.raises(RuntimeError, match="All 2 preview branches failed"):
+        asyncio.run(simulate(session, characters, max_turns=4))
 
 
 # --- _run_turns: the mechanical reveal-enforcement backstop, tested directly

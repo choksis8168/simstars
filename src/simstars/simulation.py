@@ -416,6 +416,27 @@ async def _run_preview(
     return state, end_reason
 
 
+def _partition_preview_results(raw_results: list) -> list[tuple[WorldState, EndReason | None]]:
+    """Separates successful branch previews from ones that failed even
+    after call_structured's own retries (see llm.py/retry.py). Pulled out
+    of simulate() as a pure function, matching _resolve_round, so this is
+    unit-testable without needing a real concurrent failure under
+    asyncio.gather - `raw_results` is whatever asyncio.gather(...,
+    return_exceptions=True) returns: a mix of (WorldState, EndReason|None)
+    successes and BaseException failures, one per branch.
+
+    Without this, asyncio.gather would propagate a single failed branch's
+    exception and cancel the other BRANCH_FACTOR-1 branches too, even if
+    they'd have succeeded - so only give up (raise) if every branch in the
+    round failed; otherwise the caller compares whatever did succeed.
+    """
+    results = [r for r in raw_results if not isinstance(r, BaseException)]
+    if not results:
+        failures = [r for r in raw_results if isinstance(r, BaseException)]
+        raise RuntimeError(f"All {len(raw_results)} preview branches failed; first error: {failures[0]}") from failures[0]
+    return results
+
+
 def _resolve_round(
     results: list[tuple[WorldState, EndReason | None]], comparison: dict
 ) -> tuple[WorldState, EndReason | None, bool]:
@@ -479,12 +500,14 @@ async def simulate(
         for round_num in range(MAX_SEGMENT_ROUNDS):
             base_count = len(state.events)
             clones = [state.clone() for _ in range(BRANCH_FACTOR)]
-            results = await asyncio.gather(
+            raw_results = await asyncio.gather(
                 *[
                     _run_preview(clone, director, agents, turn, preview_len, max_turns, producer_note, prior_feedback)
                     for clone in clones
-                ]
+                ],
+                return_exceptions=True,
             )
+            results = _partition_preview_results(raw_results)
             previews_new_events = [s.events[base_count:] for s, _ in results]
 
             comparison = compare_previews(state.events, previews_new_events)
