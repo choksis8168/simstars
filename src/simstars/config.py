@@ -24,6 +24,22 @@ CRITIC_MODEL = "claude-sonnet-5"
 ENRICHMENT_MODEL = "claude-sonnet-5"
 VOICE_CASTING_MODEL = "claude-haiku-4-5-20251001"  # cheap classification call, see production._infer_genders
 
+# Anthropic pricing, $ per 1M tokens - used only to estimate cost per Run
+# (see llm.py's usage tracking, persisted on Run.estimated_cost_usd). This
+# is the *standard* published rate, not a time-limited introductory price,
+# specifically so the estimate doesn't silently start under-reporting once
+# an intro window expires. A model with no entry here is simply skipped in
+# the estimate rather than raising - this is a best-effort number, not a
+# real bill.
+ANTHROPIC_PRICING_PER_MILLION_TOKENS = {
+    DIRECTOR_MODEL: {"input": 3.00, "output": 15.00},  # == CRITIC_MODEL == ENRICHMENT_MODEL
+    CHARACTER_MODEL: {"input": 1.00, "output": 5.00},  # == VOICE_CASTING_MODEL
+}
+# Standard Anthropic cache-token price multipliers, applied to a model's
+# input rate above.
+CACHE_WRITE_PRICE_MULTIPLIER = 1.25
+CACHE_READ_PRICE_MULTIPLIER = 0.10
+
 # TTS expressiveness (see production._synthesize_line). ElevenLabs library
 # voices default to conservative stored settings when no voice_settings are
 # passed - flat/monotonous line readings were a real complaint from live

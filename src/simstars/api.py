@@ -106,6 +106,8 @@ class RunOut(BaseModel):
     critic_attempts: int
     critic_reasoning: Optional[str] = None
     branch_rounds_used: int
+    llm_calls: int
+    estimated_cost_usd: float
     scenes: list[SceneOut]
     audio_url: Optional[str] = None
 
@@ -125,6 +127,8 @@ class RunOut(BaseModel):
             critic_attempts=r.critic_attempts,
             critic_reasoning=r.critic_reasoning,
             branch_rounds_used=r.branch_rounds_used,
+            llm_calls=r.llm_calls,
+            estimated_cost_usd=r.estimated_cost_usd,
             scenes=[
                 SceneOut(
                     location=sc.location,

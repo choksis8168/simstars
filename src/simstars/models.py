@@ -112,6 +112,16 @@ class Run(SQLModel, table=True):
     critic_reasoning: Optional[str] = None  # reasoning from the winning attempt's grade - debugging visibility
     branch_rounds_used: int = 0  # total re-preview rounds across all segments (see simulation.simulate)
 
+    # Anthropic usage across every attempt this generate() call made (not
+    # just the winning one - discarded attempts/branches still cost real
+    # money) - see llm.py's usage tracking. estimated_cost_usd is a rough
+    # estimate from published rates, not the real bill.
+    llm_calls: int = 0
+    llm_input_tokens: int = 0
+    llm_output_tokens: int = 0
+    llm_cache_read_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
     # persisted before production starts, so a production failure never
     # loses the (expensive) simulation result
     transcript_json: Optional[str] = None   # serialized list[Event]

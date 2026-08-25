@@ -50,6 +50,7 @@ export function RunDetail() {
       <p className="card-meta">
         {run.end_reason ?? 'in progress'} &middot; {run.critic_attempts} critic attempt(s)
         {run.branch_rounds_used > 0 ? ` · ${run.branch_rounds_used} segment re-preview(s)` : ''}
+        {run.llm_calls > 0 ? ` · ${run.llm_calls} API calls (~$${run.estimated_cost_usd.toFixed(2)} est.)` : ''}
       </p>
       {run.producer_note && <p className="forcing-mechanic">Producer's note: {run.producer_note}</p>}
 

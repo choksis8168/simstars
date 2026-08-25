@@ -25,6 +25,7 @@ from simstars.config import (
 from simstars.critic import evaluate
 from simstars.db import audio_dir, get_session, run_dir
 from simstars.enrichment import enrich_session
+from simstars.llm import estimated_cost_usd, reset_usage_tracking, usage_snapshot
 from simstars.models import Character, EndReason, Event, Run, Screenplay, Session
 from simstars.screenplay import build_screenplay
 from simstars.simulation import simulate
@@ -188,6 +189,11 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
     This is what `movie script` calls - no ElevenLabs cost.
     """
     session, characters = _load_session(session_id)
+    # Fresh accumulator for this generate() call specifically - includes
+    # every attempt's usage (a rejected/hard-failed attempt still cost real
+    # money), not just the winning one's. See llm.py's usage-tracking note
+    # on why this is a ContextVar rather than a plain global.
+    reset_usage_tracking()
 
     # Every attempt is kept, not just the last one - see docs/design.md
     # follow-on plan: the previous version of this loop only ever shipped
@@ -222,6 +228,12 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
 
     screenplay = build_screenplay(best_events)
 
+    snapshot = usage_snapshot()
+    total_calls = sum(counts["calls"] for counts in snapshot.values())
+    total_input = sum(counts["input_tokens"] for counts in snapshot.values())
+    total_output = sum(counts["output_tokens"] for counts in snapshot.values())
+    total_cache_read = sum(counts["cache_read_input_tokens"] for counts in snapshot.values())
+
     run = Run(
         session_id=session_id,
         producer_note=producer_note,
@@ -231,6 +243,11 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
         branch_rounds_used=best_rounds,
         transcript_json=json.dumps([e.model_dump(mode="json") for e in best_events]),
         screenplay_json=screenplay.model_dump_json(),
+        llm_calls=total_calls,
+        llm_input_tokens=total_input,
+        llm_output_tokens=total_output,
+        llm_cache_read_tokens=total_cache_read,
+        estimated_cost_usd=estimated_cost_usd(snapshot),
     )
     with get_session() as db:
         db.add(run)

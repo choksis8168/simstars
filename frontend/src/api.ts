@@ -38,6 +38,8 @@ export interface RunOut {
   critic_attempts: number
   critic_reasoning: string | null
   branch_rounds_used: number
+  llm_calls: number
+  estimated_cost_usd: number
   scenes: SceneOut[]
   audio_url: string | null
 }
