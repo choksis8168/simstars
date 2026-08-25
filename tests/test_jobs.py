@@ -7,10 +7,25 @@ from simstars import jobs, pipeline
 from simstars.models import JobKind, JobStatus, Run
 
 
+def _ensure_session(session_id: str) -> None:
+    """Job.session_id is a real FK (see models.py) - Postgres enforces it,
+    unlike SQLite's default lax behavior these fixtures used to rely on -
+    so any test using a bare session id string needs a Session row to
+    actually back it."""
+    from simstars.db import get_session
+    from simstars.models import Session
+
+    with get_session() as db:
+        if db.get(Session, session_id) is None:
+            db.add(Session(id=session_id, world_description="test world", locations="Kitchen,Lobby", forcing_mechanic="stuck"))
+            db.commit()
+
+
 def _create_job_row(session_id: str, kind: JobKind, created_at=None):
     from simstars.db import get_session
     from simstars.models import Job
 
+    _ensure_session(session_id)
     job = Job(session_id=session_id, kind=kind)
     if created_at is not None:
         job.created_at = created_at
@@ -25,6 +40,7 @@ def test_submit_job_creates_a_pending_row_immediately(temp_db, monkeypatch):
     # Prevent the real background thread from running during this test -
     # only the immediate row-creation behavior is under test here.
     monkeypatch.setattr(jobs, "_executor", type("Noop", (), {"submit": staticmethod(lambda *a, **k: None)})())
+    _ensure_session("session-1")
 
     job = jobs.submit_job("session-1", JobKind.GENERATE, note="be dramatic")
 
@@ -140,6 +156,7 @@ def test_submit_produce_job_pre_populates_result_run_id(temp_db, monkeypatch):
     # Unlike generate/play, a produce job's target run is known up front,
     # not just discovered on completion - see submit_produce_job()'s docstring.
     monkeypatch.setattr(jobs, "_executor", type("Noop", (), {"submit": staticmethod(lambda *a, **k: None)})())
+    _ensure_session("session-1")
 
     job = jobs.submit_produce_job("run-1", "session-1")
 

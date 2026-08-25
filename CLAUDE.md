@@ -25,6 +25,8 @@ interaction the web-app workflow needs.
 ## Commands
 
 ```
+brew services start postgresql@14             # one-time (or however Postgres is already running locally)
+createdb simstars                             # one-time - see db.py; DATABASE_URL defaults to this local db
 uv sync                                       # install/update dependencies
 cp .env.example .env                          # then fill in ANTHROPIC_API_KEY and ELEVENLABS_API_KEY
 cd frontend && npm install && npm run build   # one-time (or after frontend changes)
@@ -44,10 +46,24 @@ No lint/format/type-check tooling is configured for the Python side. The fronten
 suite (a small local-only app; manual browser verification is the norm - see docs/design.md
 web-app plan's Verification section).
 
-The Python test suite is all pure-logic/mocked — no test touches a real Anthropic or ElevenLabs
-API, so `uv run pytest` never costs money and never needs `.env` populated (DB-touching tests use
-the `temp_db` fixture in `tests/conftest.py`, never the real local `sessions/simstars.db`). Real
-API calls only happen through `simstars serve`/the CLI commands above.
+The Python test suite never touches a real Anthropic or ElevenLabs API, so `uv run pytest` never
+costs money and never needs `.env` populated. It does need a **local Postgres instance running**
+(with the `vector` extension installed - see db.py/pyproject.toml's `onnxruntime` pin note below)
+since DB-touching tests use the `temp_db` fixture in `tests/conftest.py`, which creates and drops
+a fresh throwaway database per test, never the real local `simstars` database.
+`tests/test_memory_store.py` additionally exercises the real local fastembed embedding model
+(no API key, no network call) - still free, just slower on first run while the model loads.
+Real Anthropic/ElevenLabs API calls only happen through `simstars serve`/the CLI commands above.
+
+Two environment gotchas worth knowing about, both specific to this dev machine (Intel Mac):
+`pyproject.toml` pins `onnxruntime==1.23.2` because `fastembed`'s default onnxruntime versions
+dropped macOS x86_64 wheels entirely - don't drop that pin without checking wheel availability
+first. And Homebrew's `pgvector` bottle only ships extension files for postgresql@17/@18, not the
+postgresql@14 this project runs against - it had to be built from source against `pg_config
+=/usr/local/opt/postgresql@14/bin/pg_config` (`make && make install` from a pgvector release
+checkout) rather than a plain `brew install pgvector`. Neither of these should matter on a
+different machine/architecture, but if `CREATE EXTENSION vector` or a `uv sync` involving
+`fastembed` ever fails mysteriously here, this is why.
 
 ## Architecture
 
@@ -88,17 +104,32 @@ play()         generate() -> production.produce() (TTS + SFX + music + mixing) -
   (see docs/design.md verification notes), not a hypothetical. There's also a mechanical
   backstop in `_run_turns`: the turn immediately after a director-injected event is force-routed
   to a witnessing character, regardless of what the director's own decision said.
-- **Branching lookahead**: `simulate()` doesn't generate linearly. The turn budget is grouped
-  into segments (`SEGMENT_LENGTH`); at each boundary, `BRANCH_FACTOR` short previews
-  (`PREVIEW_LENGTH` turns, not the full segment — keeps cost down) are generated in parallel via
-  `asyncio.gather`/`asyncio.to_thread` from the same cloned `WorldState`, `critic.compare_previews()`
-  picks the most dramatically promising one, and only the winner is carried forward. If even the
-  best preview is still flat, one bounded re-preview round (`MAX_SEGMENT_ROUNDS`) runs with the
-  failing reasoning fed back to the director as explicit guidance. This exists because some
-  linear runs landed a strong resolved story while others went flat and burned all critic
-  retries — branching catches that locally instead of only judging a finished transcript after
-  the fact. `_resolve_round()` and `WorldState.clone()` are pulled out as pure functions
-  specifically so this logic is unit-testable without async/concurrency machinery.
+- **Branching lookahead, orchestrated as a LangGraph `StateGraph`**: `simulate()` doesn't generate
+  linearly. The turn budget is grouped into segments (`SEGMENT_LENGTH`); at each boundary,
+  `BRANCH_FACTOR` short previews (`PREVIEW_LENGTH` turns, not the full segment — keeps cost down)
+  are generated in parallel — dispatched via LangGraph's `Send` API to the `generate_previews`
+  node, fanned back in through an `Annotated[list, operator.add]` reducer field — from the same
+  cloned `WorldState`, `critic.compare_previews()` picks the most dramatically promising one, and
+  only the winner is carried forward. If even the best preview is still flat, one bounded
+  re-preview round (`MAX_SEGMENT_ROUNDS`) runs with the failing reasoning fed back to the director
+  as explicit guidance. This exists because some linear runs landed a strong resolved story while
+  others went flat and burned all critic retries — branching catches that locally instead of only
+  judging a finished transcript after the fact. The graph's nodes (`plan_segment`,
+  `generate_previews`, `compare_and_resolve`, `finish_segment_linearly`, `finish` — see
+  `_build_graph()`) are the orchestration shell only; `DirectorAgent`, `CharacterAgent`,
+  `_run_turns`, `_resolve_round()`, and `_partition_preview_results()` are plain functions/classes
+  called from those nodes, unit-testable without any graph or concurrency machinery. No
+  checkpointer is configured — the graph runs once in-process per `simulate()` call.
+- **Character memory retrieval (pgvector)**: `CharacterAgent.decide_action` uses the full
+  chronological `memory_for(name)` verbatim while a character has witnessed
+  `MEMORY_RETRIEVAL_THRESHOLD` (8) or fewer events — identical behavior to before this existed,
+  including the prompt-caching benefit of a stable append-only prefix. Past that, it calls
+  `memory_store.retrieve_relevant_memories()` instead: local embeddings (fastembed,
+  `BAAI/bge-small-en-v1.5`) narrow to a candidate pool by pgvector cosine distance, then a blended
+  recency+relevance re-rank picks the final top-K, returned in chronological order. Scoping is
+  deliberately per-call, not per session/attempt — see `memory_store.py`'s module docstring for
+  why (branch previews would otherwise leak provisional events across siblings). `DirectorAgent`
+  never uses retrieval — its full cross-location omniscience is the invariant above.
 - Guardrails (`config.py`): 3-5 characters, 2-4 locations, ~24-38 turn budget, capped critic
   retries and segment re-preview rounds — tune here, not scattered through the engine.
 
@@ -120,8 +151,9 @@ simulation result.
 
 ### Data model (`models.py`)
 
-`sqlmodel` (SQLite) rather than JSON files, chosen so a future multi-user web app is a storage
-swap (SQLite -> Postgres) rather than a data-layer rewrite. `Character` is a single class with
+`sqlmodel` (PostgreSQL) rather than JSON files — see `db.py`/`config.DATABASE_URL` (defaults to a
+local Homebrew instance) and `memory_store.py`'s `MemoryEmbedding` table, which lives in the same
+database via `pgvector.sqlalchemy.Vector`. `Character` is a single class with
 optional hidden-enrichment fields (`secret`, `wound`, `hidden_goal`) filled in by `enrichment.py`
 after creation — there's no separate "enriched" subtype. "Hidden" means hidden from the user at
 session-creation time only; it's expected and fine for a secret to surface diegetically once a

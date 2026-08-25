@@ -63,7 +63,23 @@ MAX_SEGMENT_ROUNDS = 2  # re-preview attempts per segment if even the best candi
 MAX_CONCURRENT_ELEVENLABS_CALLS = 2
 
 DATA_ROOT = Path(os.environ.get("SIMSTARS_DATA_ROOT", Path.cwd() / "sessions"))
-DB_PATH = DATA_ROOT / "simstars.db"
+
+# Postgres connection string (psycopg3 driver). Defaults to the local
+# Homebrew instance's Unix socket (no host in the URL - the empty
+# authority between `://` and the leading `/` before the db name means
+# "use the local socket"), database name `simstars` - see db.py.
+DATABASE_URL = os.environ.get("SIMSTARS_DATABASE_URL", "postgresql+psycopg:///simstars")
+
+# Character memory retrieval (pgvector-backed, see memory_store.py). A
+# character's full witnessed-event log is used verbatim (same behavior as
+# before this existed, including the prompt-caching benefit of a stable
+# append-only prefix - see simulation.py's CharacterAgent) up to this many
+# events; past it, retrieval narrows to the most relevant/recent instead of
+# feeding the whole growing log into every call.
+MEMORY_RETRIEVAL_THRESHOLD = 8
+MEMORY_RETRIEVAL_TOP_K = 6
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+EMBEDDING_DIM = 384
 
 
 def require_anthropic_key() -> str:

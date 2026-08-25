@@ -12,7 +12,12 @@ possible as a conflict source, not just clashing goals.
 from __future__ import annotations
 
 import asyncio
+import operator
 from dataclasses import dataclass, field
+from typing import Annotated, Any, TypedDict
+
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from simstars.config import (
     BRANCH_FACTOR,
@@ -20,11 +25,13 @@ from simstars.config import (
     DIRECTOR_MODEL,
     DIRECTOR_WRAP_UP_WINDOW,
     MAX_SEGMENT_ROUNDS,
+    MEMORY_RETRIEVAL_THRESHOLD,
     PREVIEW_LENGTH,
     SEGMENT_LENGTH,
 )
 from simstars.critic import compare_previews
 from simstars.llm import cached_block, call_structured
+from simstars.memory_store import retrieve_relevant_memories
 from simstars.models import Character, EndReason, Event, EventType, Session
 
 GLOBAL = "global"  # pseudo-location: an event here is witnessed by every character regardless of where they are
@@ -99,6 +106,29 @@ class CharacterAgent:
         c = self.character
         location = state.character_locations[c.name]
         others_here = [n for n in state.present_at(location) if n != c.name]
+        witnessed = state.memory_for(c.name)
+
+        if len(witnessed) <= MEMORY_RETRIEVAL_THRESHOLD:
+            memory_text = _format_log(witnessed)
+        else:
+            # Past the threshold, retrieve a relevant subset instead of the
+            # whole growing log - see memory_store.py. This is a real
+            # tradeoff, stated plainly: retrieval-selected memories aren't a
+            # stable growing prefix, so the prompt-caching benefit below
+            # stops helping for this character once retrieval kicks in -
+            # accepted, since blocking retrieval to preserve caching would
+            # make the feature not really work.
+            query_text = (
+                f"Currently at {location}. Also here right now: {', '.join(others_here) or 'no one'}. "
+                f"Most recent thing witnessed: {witnessed[-1].content}"
+            )
+            selected = retrieve_relevant_memories(
+                memories=[(e.index, _format_log([e])) for e in witnessed],
+                query_text=query_text,
+                current_turn=turn_index,
+            )
+            memory_text = "\n".join(selected) if selected else "(nothing especially relevant comes to mind right now)"
+
         # Static for this character across every call this run - never
         # varies once c.name/c.role are set - so it's safe as a cached
         # block even though it's built fresh each call.
@@ -131,7 +161,7 @@ class CharacterAgent:
             f"World: {self.session.world_description}\n"
             f"Why you can't just leave: {self.session.forcing_mechanic}\n"
             f"All locations: {', '.join(self.session.location_list())}\n\n"
-            f"Everything you have personally witnessed so far:\n{_format_log(state.memory_for(c.name))}"
+            f"Everything you have personally witnessed so far:\n{memory_text}"
         )
         volatile_context = (
             f"\n\nYou are currently at: {location}\n"
@@ -141,7 +171,7 @@ class CharacterAgent:
                 "someone speaking. If it's significant to you, this is your "
                 "moment to react out loud - name what you noticed, ask about "
                 "it, confront someone about it. Don't let it pass in silence.\n\n"
-                if state.memory_for(c.name) and state.memory_for(c.name)[-1].type == EventType.DIRECTOR
+                if witnessed and witnessed[-1].type == EventType.DIRECTOR
                 else ""
             )
             + "What do you do on this beat?"
@@ -394,28 +424,6 @@ def _run_turns(
     return None
 
 
-async def _run_preview(
-    state: WorldState,
-    director: DirectorAgent,
-    agents: dict[str, "CharacterAgent"],
-    start_turn: int,
-    num_turns: int,
-    max_turns: int,
-    producer_note: str | None,
-    prior_feedback: str | None,
-) -> tuple[WorldState, EndReason | None]:
-    """Runs a short branch preview in a thread (the underlying Anthropic
-    calls are synchronous; `asyncio.to_thread` is the same pattern
-    production.py already uses to parallelize synchronous SDK calls).
-    Operates on `state`, which the caller must have already cloned - each
-    preview gets its own independent WorldState.
-    """
-    end_reason = await asyncio.to_thread(
-        _run_turns, state, director, agents, start_turn, num_turns, max_turns, producer_note, prior_feedback
-    )
-    return state, end_reason
-
-
 def _partition_preview_results(raw_results: list) -> list[tuple[WorldState, EndReason | None]]:
     """Separates successful branch previews from ones that failed even
     after call_structured's own retries (see llm.py/retry.py). Pulled out
@@ -462,6 +470,212 @@ def _resolve_round(
     return winning_state, winning_end_reason, should_stop
 
 
+class _SimState(TypedDict):
+    """LangGraph state for one `simulate()` call. `world_state` and the
+    scalar counters are plain fields - overwritten by whichever single node
+    wrote them last, which is always safe here because only `plan_segment`/
+    `compare_and_resolve`/`finish_segment_linearly` ever write them, never
+    the fanned-out preview branches. `branch_results` is the one field
+    multiple parallel branches write to concurrently in the same superstep,
+    so it needs the `operator.add` reducer to merge those writes instead of
+    one clobbering another - see the `Send`/reducer verification this
+    module's rewrite was built against. It grows for the whole run (every
+    round of every segment appends to it, never resets), so nodes that read
+    "this round's" results slice off exactly the last BRANCH_FACTOR entries
+    rather than clearing it - LangGraph reducer fields have no in-run reset.
+    """
+
+    world_state: WorldState
+    director: DirectorAgent
+    agents: dict[str, CharacterAgent]
+    max_turns: int
+    producer_note: str | None
+    turn: int
+    segment_len: int
+    preview_len: int
+    round_num: int
+    prior_feedback: str | None
+    total_rerounds: int
+    branch_results: Annotated[list, operator.add]
+    pending_end_reason: EndReason | None
+    route: str
+    final_events: list[Event] | None
+    final_end_reason: EndReason | None
+
+
+def _fan_out_previews(state: _SimState) -> list[Send]:
+    """Dispatches BRANCH_FACTOR parallel preview branches, each against its
+    own clone of the currently-committed world state - the `Send` fan-out
+    this rewrite is built around (see the module docstring reference above).
+    Used both as the routing function straight out of `plan_segment` and,
+    looped back into, out of `compare_and_resolve` when a round is judged
+    still flat and rounds remain.
+    """
+    return [
+        Send(
+            "generate_previews",
+            {
+                "world_state": state["world_state"].clone(),
+                "director": state["director"],
+                "agents": state["agents"],
+                "turn": state["turn"],
+                "preview_len": state["preview_len"],
+                "max_turns": state["max_turns"],
+                "producer_note": state["producer_note"],
+                "prior_feedback": state["prior_feedback"],
+            },
+        )
+        for _ in range(BRANCH_FACTOR)
+    ]
+
+
+def _plan_segment(state: _SimState) -> dict:
+    turn = state["turn"]
+    max_turns = state["max_turns"]
+    segment_len = min(SEGMENT_LENGTH, max_turns - turn + 1)
+    preview_len = min(PREVIEW_LENGTH, segment_len)
+    return {
+        "segment_len": segment_len,
+        "preview_len": preview_len,
+        "round_num": 0,
+        "prior_feedback": None,
+    }
+
+
+async def _generate_previews_node(branch: dict) -> dict:
+    """One `Send`-dispatched branch: runs a short preview on its own cloned
+    WorldState in a thread (the underlying Anthropic calls are synchronous;
+    `asyncio.to_thread` is the same pattern production.py uses to
+    parallelize synchronous SDK calls). Exceptions are caught rather than
+    left to propagate - LangGraph has no built-in equivalent of
+    `asyncio.gather(..., return_exceptions=True)`, so this branch stores its
+    own failure into `branch_results` in the same shape
+    `_partition_preview_results` already expects (a mix of successes and
+    bare exceptions), keeping that fail-soft resilience without changing it.
+    """
+    clone: WorldState = branch["world_state"]
+    try:
+        end_reason = await asyncio.to_thread(
+            _run_turns,
+            clone,
+            branch["director"],
+            branch["agents"],
+            branch["turn"],
+            branch["preview_len"],
+            branch["max_turns"],
+            branch["producer_note"],
+            branch["prior_feedback"],
+        )
+        return {"branch_results": [(clone, end_reason)]}
+    except Exception as exc:  # noqa: BLE001 - deliberately broad, see docstring
+        return {"branch_results": [exc]}
+
+
+def _compare_and_resolve(state: _SimState) -> dict:
+    this_round_raw = state["branch_results"][-BRANCH_FACTOR:]
+    results = _partition_preview_results(this_round_raw)
+
+    world_state = state["world_state"]
+    base_count = len(world_state.events)
+    previews_new_events = [s.events[base_count:] for s, _ in results]
+    comparison = compare_previews(world_state.events, previews_new_events)
+    winning_state, winning_end_reason, should_stop = _resolve_round(results, comparison)
+
+    round_num = state["round_num"]
+    is_last_round = round_num >= MAX_SEGMENT_ROUNDS - 1
+
+    if should_stop or is_last_round:
+        if winning_end_reason == EndReason.RESOLVED:
+            return {"world_state": winning_state, "pending_end_reason": EndReason.RESOLVED, "route": "finish"}
+        return {"world_state": winning_state, "route": "finish_segment_linearly"}
+
+    return {
+        "prior_feedback": comparison["reasoning"],
+        "total_rerounds": state["total_rerounds"] + 1,
+        "round_num": round_num + 1,
+        "route": "repreview",
+    }
+
+
+def _route_after_compare(state: _SimState) -> str | list[Send]:
+    if state["route"] == "repreview":
+        return _fan_out_previews(state)
+    return state["route"]  # "finish" or "finish_segment_linearly"
+
+
+async def _finish_segment_linearly(state: _SimState) -> dict:
+    remaining = state["segment_len"] - state["preview_len"]
+    world_state = state["world_state"]
+    end_reason = None
+    if remaining > 0:
+        end_reason = await asyncio.to_thread(
+            _run_turns,
+            world_state,
+            state["director"],
+            state["agents"],
+            state["turn"] + state["preview_len"],
+            remaining,
+            state["max_turns"],
+            state["producer_note"],
+            None,
+        )
+
+    if end_reason == EndReason.RESOLVED:
+        return {"world_state": world_state, "pending_end_reason": EndReason.RESOLVED, "route": "finish"}
+
+    next_turn = state["turn"] + state["segment_len"]
+    if next_turn > state["max_turns"]:
+        return {
+            "world_state": world_state,
+            "turn": next_turn,
+            "pending_end_reason": EndReason.TURN_BUDGET,
+            "route": "finish",
+        }
+    return {"world_state": world_state, "turn": next_turn, "route": "plan_segment"}
+
+
+def _route_after_linear_finish(state: _SimState) -> str:
+    return state["route"]  # "finish" or "plan_segment"
+
+
+def _finish(state: _SimState) -> dict:
+    return {"final_events": state["world_state"].events, "final_end_reason": state["pending_end_reason"]}
+
+
+def _build_graph() -> Any:
+    """Mirrors the pre-LangGraph imperative control flow directly (see
+    docs/design.md "Simulation engine"): `plan_segment` computes one
+    segment's lengths, `generate_previews` is the `Send`-fanned branch
+    node, `compare_and_resolve` is the fan-in that picks a winner and
+    routes to either another preview round, the linear segment finish, or
+    straight to `finish` if a branch already resolved the story;
+    `finish_segment_linearly` runs the segment's remaining turns and routes
+    to either `finish` or the next segment's `plan_segment`. No checkpointer
+    is configured - this graph runs once per `simulate()` call, in-process,
+    with no need to resume across restarts.
+    """
+    graph = StateGraph(_SimState)
+    graph.add_node("plan_segment", _plan_segment)
+    graph.add_node("generate_previews", _generate_previews_node)
+    graph.add_node("compare_and_resolve", _compare_and_resolve)
+    graph.add_node("finish_segment_linearly", _finish_segment_linearly)
+    graph.add_node("finish", _finish)
+
+    graph.add_edge(START, "plan_segment")
+    graph.add_conditional_edges("plan_segment", _fan_out_previews, ["generate_previews"])
+    graph.add_edge("generate_previews", "compare_and_resolve")
+    graph.add_conditional_edges(
+        "compare_and_resolve", _route_after_compare, ["generate_previews", "finish_segment_linearly", "finish"]
+    )
+    graph.add_conditional_edges("finish_segment_linearly", _route_after_linear_finish, ["plan_segment", "finish"])
+    graph.add_edge("finish", END)
+
+    return graph.compile()
+
+
+_GRAPH = _build_graph()
+
+
 async def simulate(
     session: Session,
     characters: list[Character],
@@ -469,9 +683,10 @@ async def simulate(
     producer_note: str | None = None,
 ) -> tuple[list[Event], EndReason, int]:
     """GENERATE phase, structured as branching lookahead over segments (see
-    docs/design.md follow-on plan "Story-Quality Variance Fix"): the turn
-    budget is grouped into segments; at each segment boundary BRANCH_FACTOR
-    short previews (PREVIEW_LENGTH turns) are generated in parallel from the
+    docs/design.md follow-on plan "Story-Quality Variance Fix") and run as a
+    LangGraph `StateGraph` (see `_build_graph`): the turn budget is grouped
+    into segments; at each segment boundary BRANCH_FACTOR short previews
+    (PREVIEW_LENGTH turns) are generated in parallel via `Send` from the
     same committed state, a comparative evaluator picks the most
     dramatically promising one, and only the winner is carried forward -
     the rest are discarded. This catches a story going flat locally, before
@@ -482,55 +697,23 @@ async def simulate(
     many times a segment needed a re-preview round because even the best
     candidate was still judged flat (observability signal persisted on Run).
     """
-    state = WorldState.initial(characters)
-    director = DirectorAgent(session, characters)
-    agents = {c.name: CharacterAgent(c, session) for c in characters}
-
-    turn = 1
-    total_rerounds = 0
-
-    while turn <= max_turns:
-        segment_len = min(SEGMENT_LENGTH, max_turns - turn + 1)
-        preview_len = min(PREVIEW_LENGTH, segment_len)
-
-        prior_feedback: str | None = None
-        winning_state: WorldState | None = None
-        winning_end_reason: EndReason | None = None
-
-        for round_num in range(MAX_SEGMENT_ROUNDS):
-            base_count = len(state.events)
-            clones = [state.clone() for _ in range(BRANCH_FACTOR)]
-            raw_results = await asyncio.gather(
-                *[
-                    _run_preview(clone, director, agents, turn, preview_len, max_turns, producer_note, prior_feedback)
-                    for clone in clones
-                ],
-                return_exceptions=True,
-            )
-            results = _partition_preview_results(raw_results)
-            previews_new_events = [s.events[base_count:] for s, _ in results]
-
-            comparison = compare_previews(state.events, previews_new_events)
-            winning_state, winning_end_reason, should_stop = _resolve_round(results, comparison)
-
-            if should_stop or round_num == MAX_SEGMENT_ROUNDS - 1:
-                break
-            prior_feedback = comparison["reasoning"]
-            total_rerounds += 1
-
-        state = winning_state
-
-        if winning_end_reason == EndReason.RESOLVED:
-            return state.events, EndReason.RESOLVED, total_rerounds
-
-        remaining = segment_len - preview_len
-        if remaining > 0:
-            end_reason = await asyncio.to_thread(
-                _run_turns, state, director, agents, turn + preview_len, remaining, max_turns, producer_note, None
-            )
-            if end_reason == EndReason.RESOLVED:
-                return state.events, EndReason.RESOLVED, total_rerounds
-
-        turn += segment_len
-
-    return state.events, EndReason.TURN_BUDGET, total_rerounds
+    initial_state: _SimState = {
+        "world_state": WorldState.initial(characters),
+        "director": DirectorAgent(session, characters),
+        "agents": {c.name: CharacterAgent(c, session) for c in characters},
+        "max_turns": max_turns,
+        "producer_note": producer_note,
+        "turn": 1,
+        "segment_len": 0,
+        "preview_len": 0,
+        "round_num": 0,
+        "prior_feedback": None,
+        "total_rerounds": 0,
+        "branch_results": [],
+        "pending_end_reason": None,
+        "route": "",
+        "final_events": None,
+        "final_end_reason": None,
+    }
+    result = await _GRAPH.ainvoke(initial_state)
+    return result["final_events"], result["final_end_reason"], result["total_rerounds"]

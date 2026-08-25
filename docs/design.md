@@ -108,13 +108,19 @@ subfolder so prior runs aren't overwritten.
   Director sees) plus a `character -> current_location` map. Movement is
   just an `Event` of type `movement` that updates the map.
 - `CharacterAgent`: holds a memory stream filtered to events tagged with
-  the character's location *at the time of that event* (chronological; no
-  vector retrieval needed yet — movies are short), plus public/hidden
-  goals. A character can only act on what they've directly witnessed —
-  this is what makes secrets-kept-from-one-person and misunderstandings
-  possible as a conflict source, not just clashing goals.
-  `decide_action(filtered_memory) -> Event` via Claude (Haiku — many
-  calls/movie, needs speed over depth).
+  the character's location *at the time of that event*. Up to 8 witnessed
+  events, that's the full chronological log verbatim (same as always);
+  past that, it's a pgvector-backed retrieval instead — see `memory_store.py`
+  — narrowed by cosine distance against a "what's happening right now"
+  query, then re-ranked by a blended recency+relevance score (matching the
+  Generative Agents/Smallville memory architecture) so an old-but-relevant
+  memory and a recent-but-minor one both get a fair shot. Embeddings are
+  local (fastembed, no API key). `DirectorAgent` never uses retrieval — its
+  full cross-location omniscience is deliberate (see below). A character
+  can only act on what they've directly witnessed — this is what makes
+  secrets-kept-from-one-person and misunderstandings possible as a conflict
+  source, not just clashing goals. `decide_action(filtered_memory) ->
+  Event` via Claude (Haiku — many calls/movie, needs speed over depth).
 - `DirectorAgent`: `pick_next(state)`, `maybe_inject_event(state)`
   (location-scoped, e.g. "the phone rings in the kitchen," or global, e.g.
   a broadcast everyone hears), `evaluate_arc(state) -> continue | escalate |
@@ -126,7 +132,14 @@ subfolder so prior runs aren't overwritten.
 - Loop: each turn, director acts itself or picks an actor → whoever acted
   logs an `Event` (with location) → world state and only the relevant
   characters' memories are updated with it → director evaluates → break on
-  cut.
+  cut. The turn budget is grouped into segments; at each segment boundary
+  several short branch previews are generated in parallel and a comparator
+  picks the most dramatically promising one to commit, rather than
+  committing to one linear path and only judging it after the fact — this
+  whole loop (`simulation.simulate()`) is orchestrated as a LangGraph
+  `StateGraph`, with the parallel previews dispatched via `Send`-based
+  fan-out and joined back through a reducer field. See the LangGraph entry
+  under "Tech stack" below for the node/edge shape.
 
 ### Critic pass
 Separate Sonnet call scoring the finished transcript against story-shape
@@ -154,12 +167,12 @@ output.
   Per-call retry with backoff on transient API failures.
 
 ### Persistence
-`sqlmodel` (pydantic + SQLite) instead of raw JSON files — same amount of
-effort to set up now, but avoids a migration later: a future web app needs
-concurrent sessions/multiple users, and SQLite-via-sqlmodel gets there
-without changing the data layer, just swapping SQLite for Postgres.
-Generated audio artifacts (per-line clips, final mix) still live as plain
-files on disk, referenced by path from the DB row:
+`sqlmodel` (pydantic + PostgreSQL) instead of raw JSON files — session/run
+rows live in Postgres (a local Homebrew instance by default, see
+`db.py`/`config.DATABASE_URL`), the same database the character-memory
+embeddings table (below) lives in, so retrieval doesn't need a second data
+store. Generated audio artifacts (per-line clips, final mix) still live as
+plain files on disk, referenced by path from the DB row:
 ```
 sessions/<session_id>/
   runs/<run_id>/
@@ -192,23 +205,33 @@ rewrite of the engine.
 - **pydantic**: typed data models throughout.
 - **pydub + ffmpeg**: audio assembly/mixing.
 - **Typer**: CLI.
-- **sqlmodel (SQLite)**: session/run persistence — chosen over flat JSON
-  specifically so a later web app (multi-user, concurrent sessions) is a
-  storage swap (SQLite → Postgres) rather than a rewrite.
+- **sqlmodel (PostgreSQL)**: session/run persistence, plus the character
+  memory embeddings table (below) — same database, no second data store.
+- **LangGraph**: orchestrates the GENERATE-phase turn-taking/branching loop
+  (`simulation.simulate()`) as a `StateGraph` — see "Simulation engine"
+  above for the node/edge shape. Replaces what used to be a hand-written
+  `while`/`for` loop with the same control flow expressed as nodes and
+  conditional edges; `Send`-based fan-out drives the parallel branch
+  previews, an `Annotated[list, operator.add]` reducer field fans them back
+  in. `DirectorAgent`, `CharacterAgent`, `_run_turns`, and the pure decision
+  functions (`_resolve_round`, `_partition_preview_results`) are unchanged
+  by this — the rewrite is specifically the orchestration shell, not the
+  agent logic. No checkpointer is configured: the graph runs once
+  in-process per `simulate()` call, with no need to resume across restarts.
+- **pgvector**: backs live character-memory retrieval — see "Simulation
+  engine" above and `memory_store.py`. Embeddings are generated locally via
+  **fastembed** (`BAAI/bge-small-en-v1.5`, 384-dim, ONNX-based — no API key,
+  no PyTorch dependency), so this adds no new external API cost.
 - **asyncio**: parallelizes independent TTS/SFX production calls (the
   generate-phase LLM calls stay sequential — they're inherently turn-based).
 - **python-dotenv**: loads `ANTHROPIC_API_KEY`/`ELEVENLABS_API_KEY` from a
   local `.env` (not committed) — the one setup/config piece the earlier
   draft omitted entirely.
 
-Deliberately deferred for v1: a graph-based agent framework (e.g.
-LangGraph) — a custom turn-taking loop gives the director more direct
-control than forcing this into a graph abstraction; a vector DB for
-character memory — only needed once sessions get long or persist across
-episodes (out of scope for "one self-contained story per session"); and
-FastAPI/React for a web UI — the engine is built as a library from day one
-(see CLI section) specifically so this can be added later without
-disturbing the core.
+FastAPI/React for a web UI was deferred past the original v1 scope but has
+since been built — see the web-app plan below; the engine was built as a
+library from day one (see CLI section) specifically so that could happen
+without disturbing the core.
 
 ### Scope guardrails (cost/complexity control)
 - 3–5 characters per movie.
