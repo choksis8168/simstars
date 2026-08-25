@@ -1,9 +1,9 @@
 """Scene-grouping is deterministic (no LLM call), so it's tested directly
-without mocking - the cue-adding LLM call (_add_cues) is exercised
-separately via the mocked dry run, not here."""
+without mocking. _add_cues (narration/SFX/music, the one LLM call in this
+module) is tested separately below with call_structured mocked."""
 
 from simstars.models import Event, EventType
-from simstars.screenplay import _format_line, _group_scenes
+from simstars.screenplay import _add_cues, _format_line, _group_scenes
 from simstars.simulation import GLOBAL
 
 
@@ -101,3 +101,52 @@ def test_format_line_for_each_event_type():
     assert _format_line(movement) == "[Ana moves to Lobby]"
     assert _format_line(global_event) == "[EVERYWHERE] thunder"
     assert _format_line(local_event) == "[EVENT] knock"
+
+
+# --- _add_cues: narration/SFX/music attachment, call_structured mocked ---
+
+
+def _scene(location: str = "Kitchen") -> "Scene":
+    from simstars.models import Scene
+
+    return Scene(location=location, heading=f"INT. {location.upper()}", lines=["ANA: hi"], events=[])
+
+
+def test_add_cues_attaches_narration_sfx_and_music_per_scene(monkeypatch):
+    def fake_call_structured(**kwargs):
+        return {
+            "scenes": [
+                {
+                    "scene_index": 0,
+                    "narration": "It's the last night the shop is open.",
+                    "sfx_cues": ["door chime", "footsteps on wood"],
+                    "music_cue": "tense low strings",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("simstars.screenplay.call_structured", fake_call_structured)
+    scenes = _add_cues([_scene()])
+
+    assert scenes[0].narration == "It's the last night the shop is open."
+    assert scenes[0].sfx_cues == ["door chime", "footsteps on wood"]
+    assert scenes[0].music_cue == "tense low strings"
+
+
+def test_add_cues_leaves_a_scene_without_a_matching_index_unset(monkeypatch):
+    monkeypatch.setattr("simstars.screenplay.call_structured", lambda **kwargs: {"scenes": []})
+    scenes = _add_cues([_scene()])
+
+    assert scenes[0].narration is None
+    assert scenes[0].sfx_cues == []
+    assert scenes[0].music_cue is None
+
+
+def test_add_cues_treats_an_empty_narration_string_as_none(monkeypatch):
+    monkeypatch.setattr(
+        "simstars.screenplay.call_structured",
+        lambda **kwargs: {"scenes": [{"scene_index": 0, "narration": "", "sfx_cues": [], "music_cue": "quiet"}]},
+    )
+    scenes = _add_cues([_scene()])
+
+    assert scenes[0].narration is None

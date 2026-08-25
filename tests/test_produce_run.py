@@ -12,7 +12,10 @@ from simstars.models import Character, Run, Session
 
 
 def _seed_session_and_character() -> Session:
-    session = Session(world_description="A test world", locations="Kitchen, Lobby", forcing_mechanic="stuck")
+    session = Session(
+        world_description="A test world", locations="Kitchen, Lobby", forcing_mechanic="stuck",
+        narrator_voice_id="narrator-voice-1",
+    )
     with get_session() as db:
         db.add(session)
         db.commit()
@@ -57,8 +60,9 @@ def test_produce_run_calls_production_with_the_persisted_screenplay_and_voices(t
 
     captured = {}
 
-    async def fake_produce(screenplay, voice_by_name, out_dir):
+    async def fake_produce(screenplay, voice_by_name, out_dir, narrator_voice_id=None):
         captured["voice_by_name"] = voice_by_name
+        captured["narrator_voice_id"] = narrator_voice_id
         return tmp_path / "final_movie.mp3"
 
     monkeypatch.setattr(pipeline.production, "produce", fake_produce)
@@ -66,6 +70,7 @@ def test_produce_run_calls_production_with_the_persisted_screenplay_and_voices(t
     updated = pipeline.produce_run(run.id)
 
     assert captured["voice_by_name"] == {"Ana": "voice-123"}
+    assert captured["narrator_voice_id"] == "narrator-voice-1"
     assert updated.final_audio_path == str(tmp_path / "final_movie.mp3")
 
     with get_session() as db:
@@ -91,7 +96,7 @@ def test_play_is_generate_then_produce_run(temp_db, monkeypatch, tmp_path):
 
     from simstars.models import Screenplay
 
-    async def fake_produce(screenplay, voice_by_name, out_dir):
+    async def fake_produce(screenplay, voice_by_name, out_dir, narrator_voice_id=None):
         return tmp_path / "final_movie.mp3"
 
     monkeypatch.setattr(pipeline, "simulate", fake_simulate)

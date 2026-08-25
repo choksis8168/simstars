@@ -26,6 +26,7 @@ export interface SceneOut {
   lines: string[]
   sfx_cues: string[]
   music_cue: string | null
+  narration: string | null
 }
 
 export interface RunOut {

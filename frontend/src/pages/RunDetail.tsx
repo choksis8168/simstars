@@ -72,6 +72,7 @@ export function RunDetail() {
       {run.scenes.map((scene, i) => (
         <div className="scene" key={i}>
           <h3>{scene.heading}</h3>
+          {scene.narration && <p className="narration">{scene.narration}</p>}
           {scene.sfx_cues.length > 0 && <p className="cue">SFX: {scene.sfx_cues.join(', ')}</p>}
           {scene.music_cue && <p className="cue">Music: {scene.music_cue}</p>}
           {scene.lines.map((line, j) => (

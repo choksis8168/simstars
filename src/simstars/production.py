@@ -135,6 +135,29 @@ def cast_voices(characters: list[Character]) -> None:
         used.add(choice)
 
 
+def cast_narrator_voice() -> str:
+    """Picks one voice for scene-setting narration (see screenplay.py's
+    narration field), cast once at session creation like character voices
+    - reused across regenerates for the same session, same as them.
+    Searches ElevenLabs' "narrative_story" use-case category rather than
+    free text, since that's a real, purpose-built category in the library
+    (distinct from the ad-hoc per-character search above) - a voice
+    actually cast for reading narration, not just whichever came back for
+    a role/traits string.
+    """
+    client = _get_client()
+    try:
+        result = with_retry(lambda: client.voices.search(use_cases="narrative_story", page_size=5))
+        candidates = [v.voice_id for v in result.voices]
+    except Exception:  # noqa: BLE001 - fall through to the unfiltered library below
+        candidates = []
+    if not candidates:
+        candidates = [v.voice_id for v in with_retry(client.voices.get_all).voices]
+    if not candidates:
+        raise RuntimeError("No ElevenLabs voices available on this account.")
+    return candidates[0]
+
+
 # --- Per-clip generation (parallelized across a run) ---
 
 
@@ -209,6 +232,7 @@ async def produce(
     screenplay: Screenplay,
     voice_by_name: dict[str, str],
     out_dir: Path,
+    narrator_voice_id: str | None = None,
 ) -> Path:
     # Shared across the whole call (not one per gather()) so dialogue and
     # SFX bursts within a scene both draw from the same budget - see
@@ -220,6 +244,16 @@ async def produce(
     scene_segments: list[AudioSegment] = []
 
     for scene_index, scene in enumerate(screenplay.scenes):
+        # Narration, read first if this scene has one - a missing
+        # narrator_voice_id (an older session predating this feature, or a
+        # failed narrator cast) degrades to silently skipping it rather
+        # than raising.
+        narration_track = AudioSegment.silent(0)
+        if scene.narration and narrator_voice_id:
+            narration_bytes = await _synthesize_line(scene.narration, narrator_voice_id, limiter)
+            (out_dir / f"scene{scene_index}_narration.mp3").write_bytes(narration_bytes)
+            narration_track = _bytes_to_segment(narration_bytes) + AudioSegment.silent(400)
+
         # dialogue lines, back to back, throttled to at most
         # MAX_CONCURRENT_ELEVENLABS_CALLS in flight at once
         dialogue_events = [e for e in scene.events if e.type == EventType.DIALOGUE]
@@ -235,7 +269,9 @@ async def produce(
             path.write_bytes(data)
             dialogue_track += _bytes_to_segment(data) + AudioSegment.silent(250)
 
-        # SFX, same throttling, laid at the top of the scene
+        dialogue_track = narration_track + dialogue_track
+
+        # SFX, same throttling, laid at the top of the scene (narration included)
         sfx_bytes = await asyncio.gather(*[_generate_sfx(cue, limiter) for cue in scene.sfx_cues])
         sfx_track = AudioSegment.silent(len(dialogue_track))
         for i, data in enumerate(sfx_bytes):

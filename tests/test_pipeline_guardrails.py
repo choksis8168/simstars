@@ -85,6 +85,7 @@ def test_new_session_trims_whitespace_so_dropdown_selection_always_matches(temp_
 
     monkeypatch.setattr(pipeline_module, "enrich_session", lambda world, locations, characters: "stuck")
     monkeypatch.setattr(production, "cast_voices", lambda characters: None)
+    monkeypatch.setattr(production, "cast_narrator_voice", lambda: "narrator-voice-1")
 
     specs = [_spec("A", "lockers "), _spec("B", "lockers"), _spec("C", " class")]
     session = new_session("  A highschool  ", ["lockers ", "class", "house party"], specs)

@@ -38,8 +38,10 @@ class FakeVoicesClient:
         self.results_by_gender = results_by_gender
         self._fallback_ids = fallback_ids
 
-    def search(self, *, search=None, gender=None, page_size=5):
-        self.calls.append({"search": search, "gender": gender})
+    def search(self, *, search=None, gender=None, use_cases=None, page_size=5):
+        self.calls.append({"search": search, "gender": gender, "use_cases": use_cases})
+        if use_cases is not None:
+            return self.results_by_gender.get(use_cases, _FakeSearchResult([]))
         return self.results_by_gender.get(gender, _FakeSearchResult([]))
 
     def get_all(self):
@@ -138,6 +140,33 @@ def test_cast_voices_avoids_duplicate_voices_within_the_cast(no_op_gender_infere
 
     assert characters[0].voice_id == "voice-a"
     assert characters[1].voice_id == "voice-b"
+
+
+def test_cast_narrator_voice_searches_the_narrative_story_use_case(monkeypatch):
+    voices_client = FakeVoicesClient({"narrative_story": _FakeSearchResult(["voice-narrator"])}, fallback_ids=["fallback-1"])
+    monkeypatch.setattr(production, "_get_client", lambda: FakeClient(voices_client))
+
+    voice_id = production.cast_narrator_voice()
+
+    assert voices_client.calls[0]["use_cases"] == "narrative_story"
+    assert voice_id == "voice-narrator"
+
+
+def test_cast_narrator_voice_falls_back_to_the_full_library_when_search_is_empty(monkeypatch):
+    voices_client = FakeVoicesClient({}, fallback_ids=["fallback-1"])
+    monkeypatch.setattr(production, "_get_client", lambda: FakeClient(voices_client))
+
+    voice_id = production.cast_narrator_voice()
+
+    assert voice_id == "fallback-1"
+
+
+def test_cast_narrator_voice_raises_when_no_voices_exist_at_all(monkeypatch):
+    voices_client = FakeVoicesClient({}, fallback_ids=[])
+    monkeypatch.setattr(production, "_get_client", lambda: FakeClient(voices_client))
+
+    with pytest.raises(RuntimeError, match="No ElevenLabs voices"):
+        production.cast_narrator_voice()
 
 
 def test_synthesize_line_passes_tuned_voice_settings(monkeypatch):

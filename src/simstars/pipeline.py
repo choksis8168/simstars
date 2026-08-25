@@ -84,6 +84,7 @@ def new_session(world_description: str, locations: list[str], cast_specs: list[C
     forcing_mechanic = enrich_session(world_description, locations, characters)
     session.forcing_mechanic = forcing_mechanic
     production.cast_voices(characters)
+    session.narrator_voice_id = production.cast_narrator_voice()
 
     with get_session() as db:
         db.add(session)
@@ -257,12 +258,12 @@ def produce_run(run_id: str) -> Run:
     if not run.screenplay_json:
         raise ValueError(f"Run '{run_id}' has no screenplay yet - nothing to produce.")
 
-    _session, characters = _load_session(run.session_id)
+    session, characters = _load_session(run.session_id)
     voice_by_name = {c.name: c.voice_id for c in characters if c.voice_id}
     screenplay = Screenplay.model_validate_json(run.screenplay_json)
 
     out_dir = audio_dir(run.session_id, run.id)
-    final_path = asyncio.run(production.produce(screenplay, voice_by_name, out_dir))
+    final_path = asyncio.run(production.produce(screenplay, voice_by_name, out_dir, session.narrator_voice_id))
 
     run.final_audio_path = str(final_path)
     with get_session() as db:

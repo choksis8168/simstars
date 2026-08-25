@@ -94,6 +94,7 @@ class SceneOut(BaseModel):
     lines: list[str]
     sfx_cues: list[str]
     music_cue: Optional[str] = None
+    narration: Optional[str] = None
 
 
 class RunOut(BaseModel):
@@ -131,6 +132,7 @@ class RunOut(BaseModel):
                     lines=sc.lines,
                     sfx_cues=sc.sfx_cues,
                     music_cue=sc.music_cue,
+                    narration=sc.narration,
                 )
                 for sc in screenplay.scenes
             ],

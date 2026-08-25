@@ -90,6 +90,7 @@ class Session(SQLModel, table=True):
     world_description: str
     forcing_mechanic: Optional[str] = None  # filled in by enrichment if the user didn't supply one
     locations: str  # comma-separated location names; kept simple, no separate Location table for v1
+    narrator_voice_id: Optional[str] = None  # ElevenLabs voice for scene-setting narration, cast once like character voices
 
     characters: list[Character] = Relationship(back_populates="session")
     runs: list["Run"] = Relationship(back_populates="session")
@@ -165,6 +166,7 @@ class Scene(SQLModel):
     events: list[Event]  # the underlying events, kept structured for production (TTS needs actor+text)
     sfx_cues: list[str] = []
     music_cue: Optional[str] = None
+    narration: Optional[str] = None  # short voiced scene-setting line, read by the narrator - see screenplay.py
 
 
 class Screenplay(SQLModel):

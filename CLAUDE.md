@@ -143,11 +143,24 @@ candidate (cheaper, more reliable than calibrating scores that then get compared
 ### Production (`production.py`)
 
 Voice casting happens once at session creation (persisted, reused across regenerate runs — same
-character should sound the same movie to movie). TTS/SFX/music generation are parallelized via
-`asyncio.to_thread` over the synchronous ElevenLabs SDK calls. Mixing is scene-level, not
-per-line — a known simplification, not a bug. The transcript/screenplay are persisted *before*
-production starts specifically so a mid-production API failure never loses the (expensive)
-simulation result.
+character should sound the same movie to movie): `cast_voices()` infers each character's likely
+gender from name/role/traits (one batched call, `_infer_genders`) and passes it to ElevenLabs'
+`voices.search(gender=...)` — searching on role/traits text alone had no gender signal at all, a
+real bug found via live usage. `cast_narrator_voice()` separately casts one voice from the
+`narrative_story` use case for scene-setting narration, stored on `Session.narrator_voice_id`.
+`_synthesize_line` passes explicit `voice_settings` (`config.TTS_STABILITY/TTS_STYLE/...`) —
+previously none were passed, so ElevenLabs fell back to each library voice's conservative stored
+defaults, which read as flat/robotic; another real live-usage complaint.
+
+`screenplay.build_screenplay()`'s cue-generation call also produces a short `narration` line per
+scene (read by the narrator, ahead of that scene's dialogue in `produce()`) and asks for 2-4 SFX
+cues per scene rather than an unspecified count — both added in response to feedback that scenes
+were hard to follow without context and felt sparse on sound design.
+
+TTS/SFX/music generation are parallelized via `asyncio.to_thread` over the synchronous ElevenLabs
+SDK calls. Mixing is scene-level, not per-line — a known simplification, not a bug. The
+transcript/screenplay are persisted *before* production starts specifically so a mid-production
+API failure never loses the (expensive) simulation result.
 
 ### Data model (`models.py`)
 
