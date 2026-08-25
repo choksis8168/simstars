@@ -22,6 +22,17 @@ CHARACTER_MODEL = "claude-haiku-4-5-20251001"
 DIRECTOR_MODEL = "claude-sonnet-5"
 CRITIC_MODEL = "claude-sonnet-5"
 ENRICHMENT_MODEL = "claude-sonnet-5"
+VOICE_CASTING_MODEL = "claude-haiku-4-5-20251001"  # cheap classification call, see production._infer_genders
+
+# TTS expressiveness (see production._synthesize_line). ElevenLabs library
+# voices default to conservative stored settings when no voice_settings are
+# passed - flat/monotonous line readings were a real complaint from live
+# usage. Lower stability = broader emotional range (ElevenLabs' own
+# description); some style exaggeration on top makes dramatic dialogue read
+# less like narration. Tune here, not inline at the call site.
+TTS_STABILITY = 0.35
+TTS_SIMILARITY_BOOST = 0.75
+TTS_STYLE = 0.45
 
 # Scope guardrails (cost/complexity control)
 MIN_CHARACTERS = 3

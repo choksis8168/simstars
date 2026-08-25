@@ -14,10 +14,19 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from elevenlabs import VoiceSettings
 from elevenlabs.client import ElevenLabs
 from pydub import AudioSegment
 
-from simstars.config import MAX_CONCURRENT_ELEVENLABS_CALLS, require_elevenlabs_key
+from simstars.config import (
+    MAX_CONCURRENT_ELEVENLABS_CALLS,
+    TTS_SIMILARITY_BOOST,
+    TTS_STABILITY,
+    TTS_STYLE,
+    VOICE_CASTING_MODEL,
+    require_elevenlabs_key,
+)
+from simstars.llm import call_structured
 from simstars.models import Character, EventType, Screenplay
 from simstars.retry import with_retry
 
@@ -38,6 +47,52 @@ def _collect(chunks) -> bytes:
 # --- Voice casting (session-creation time, persisted, reused across regenerates) ---
 
 
+def _infer_genders(characters: list[Character]) -> dict[str, str]:
+    """One batched call inferring each character's likely voice gender from
+    name/role/traits, so cast_voices can filter ElevenLabs' voice search by
+    it. Real bug found via live usage: searching on role/traits text alone
+    gave the API no gender signal at all, so e.g. a character named "Travis"
+    could just as easily land a female-labeled voice as a male one - the
+    search had nothing to disambiguate on. "neutral" means genuinely
+    ambiguous or non-binary; cast_voices skips the gender filter for those
+    rather than forcing a guess.
+    """
+    roster = "\n".join(f"- {c.name}: role={c.role}, traits={c.traits}" for c in characters)
+    result = call_structured(
+        model=VOICE_CASTING_MODEL,
+        system=(
+            "You infer the most likely voice gender for fictional characters, "
+            "for casting a text-to-speech voice - use naming convention as the "
+            "primary signal, role/traits as secondary."
+        ),
+        user=(
+            f"Characters:\n{roster}\n\n"
+            "For each character, decide 'male', 'female', or 'neutral' "
+            "(genuinely ambiguous or non-binary)."
+        ),
+        tool_name="infer_voice_genders",
+        tool_description="Infer each character's likely voice gender for TTS voice casting.",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "genders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "gender": {"type": "string", "enum": ["male", "female", "neutral"]},
+                        },
+                        "required": ["name", "gender"],
+                    },
+                }
+            },
+            "required": ["genders"],
+        },
+    )
+    return {entry["name"]: entry["gender"] for entry in result["genders"]}
+
+
 def cast_voices(characters: list[Character]) -> None:
     """Assigns character.voice_id in place, one ElevenLabs library voice per
     character, avoiding duplicates within the cast where possible.
@@ -46,16 +101,29 @@ def cast_voices(characters: list[Character]) -> None:
     used: set[str] = set()
     fallback = [v.voice_id for v in client.voices.get_all().voices]
 
+    try:
+        genders = _infer_genders(characters)
+    except Exception:  # noqa: BLE001 - gender matching is a nice-to-have, never blocks casting
+        genders = {}
+
     for character in characters:
         query = f"{character.role} {character.traits}".strip()[:200]
+        gender = genders.get(character.name)
+        search_gender = gender if gender in ("male", "female") else None
 
-        def search():
-            return client.voices.search(search=query, page_size=5)
+        def search(g=search_gender):
+            return client.voices.search(search=query, gender=g, page_size=5)
 
         candidates: list[str] = []
         try:
             result = with_retry(search)
             candidates = [v.voice_id for v in result.voices]
+            if not candidates and search_gender is not None:
+                # gender + text search together came up empty - retry with
+                # just the text search rather than falling all the way back
+                # to the fully unfiltered library.
+                result = with_retry(lambda: client.voices.search(search=query, page_size=5))
+                candidates = [v.voice_id for v in result.voices]
         except Exception:  # noqa: BLE001 - fall through to the unfiltered library below
             candidates = []
 
@@ -80,6 +148,16 @@ async def _synthesize_line(text: str, voice_id: str, limiter: asyncio.Semaphore)
                 text=text,
                 model_id="eleven_multilingual_v2",
                 output_format="mp3_44100_128",
+                # Library voices default to conservative stored settings
+                # when no voice_settings are passed - flat, monotonous line
+                # readings were a real complaint from live usage. See
+                # config.py for what these values do.
+                voice_settings=VoiceSettings(
+                    stability=TTS_STABILITY,
+                    similarity_boost=TTS_SIMILARITY_BOOST,
+                    style=TTS_STYLE,
+                    use_speaker_boost=True,
+                ),
             )
         )
 
