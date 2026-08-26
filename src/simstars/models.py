@@ -66,6 +66,21 @@ class Character(SQLModel, table=True):
     starting_location: str
     voice_id: Optional[str] = None  # ElevenLabs voice, assigned once at session creation
 
+    # Per-character TTS tuning (set once in production.cast_voices, alongside
+    # voice_id) - a single global stability/style setting either sounds flat
+    # for everyone or, pushed expressive enough for a heated scene, starts
+    # eroding what makes a *specific* voice recognizable as itself. base
+    # values are this character's calm-delivery settings; voice_range is how
+    # far intensity (see Event.intensity) is allowed to swing them before
+    # production.py's floor/ceiling clamp any character's delivery becoming
+    # unrecognizable - a naturally volatile character tolerates a wider
+    # swing than a reserved one. This is a reasonable heuristic starting
+    # point (inferred from traits, same call as gender - see
+    # production._infer_voice_traits), not something verified by ear.
+    voice_stability_base: Optional[float] = None
+    voice_style_base: Optional[float] = None
+    voice_range: Optional[float] = None
+
     # hidden enrichment (filled in by enrichment.py, never echoed back to the user)
     secret: Optional[str] = None
     wound: Optional[str] = None
@@ -168,6 +183,14 @@ class Event(SQLModel):
     location: str
     content: str  # dialogue text, action description, or movement destination
     target: Optional[str] = None  # who the dialogue/action is directed at, if anyone
+    # Set by DirectorAgent on every turn's decision (see simulation.py),
+    # carried onto whichever Event that turn produces - 0.0 (calm) to 1.0
+    # (peak). This is how emotional intensity builds across a scene instead
+    # of resetting every independently-generated TTS line: production.py
+    # scales each dialogue line's voice_settings and inter-line pause off
+    # of it. Meaningless for non-DIALOGUE events (production ignores it
+    # there - only dialogue is ever voiced).
+    intensity: Optional[float] = None
 
 
 class Scene(SQLModel):
@@ -176,7 +199,17 @@ class Scene(SQLModel):
     lines: list[str]  # formatted dialogue/action lines, for display (e.g. `movie script`)
     events: list[Event]  # the underlying events, kept structured for production (TTS needs actor+text)
     sfx_cues: list[str] = []
+    # Same length as sfx_cues - the 0-indexed position within `lines`/
+    # `events` each cue should land at, so a door slam plays when the door
+    # slams rather than every cue firing at the top of the scene - see
+    # screenplay._add_cues and production.produce. Missing/out-of-range
+    # entries default to the scene's start (0), matching the old behavior.
+    sfx_cue_positions: list[int] = []
     music_cue: Optional[str] = None
+    # 0-indexed position within `lines`/`events` marking this scene's
+    # emotional peak, where the ducked underscore should briefly swell -
+    # None if the scene has no clear peak (production.py just skips it).
+    music_swell_line_index: Optional[int] = None
     narration: Optional[str] = None  # short voiced scene-setting line, read by the narrator - see screenplay.py
 
 

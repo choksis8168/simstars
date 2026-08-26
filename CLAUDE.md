@@ -105,6 +105,11 @@ play()         generate() -> production.produce() (TTS + SFX + music + mixing) -
   (see docs/design.md verification notes), not a hypothetical. There's also a mechanical
   backstop in `_run_turns`: the turn immediately after a director-injected event is force-routed
   to a witnessing character, regardless of what the director's own decision said.
+- **Performance intensity**: every turn, `DirectorAgent` also emits an `intensity` (0.0-1.0)
+  tracking the *scene's* emotional arc, not just that one line — attached to whichever `Event`
+  the turn produces (survives the reveal-enforcement backstop above, since the backstop only
+  overrides *who* acts, not the director's read on the scene). See `production.py`'s per-character
+  voice-settings scaling for where this actually becomes audible.
 - **Pre-generation outline (`outline.py`)**: before `simulate()` runs a single turn, one Sonnet
   call sketches a rough 3-5 beat dramatic arc from the cast's hidden secrets/wounds/goals - not a
   script, just guidance fed into `DirectorAgent`'s cached prompt context (director-only, same
@@ -152,23 +157,39 @@ candidate (cheaper, more reliable than calibrating scores that then get compared
 
 Voice casting happens once at session creation (persisted, reused across regenerate runs — same
 character should sound the same movie to movie): `cast_voices()` infers each character's likely
-gender from name/role/traits (one batched call, `_infer_genders`) and passes it to ElevenLabs'
-`voices.search(gender=...)` — searching on role/traits text alone had no gender signal at all, a
-real bug found via live usage. `cast_narrator_voice()` separately casts one voice from the
-`narrative_story` use case for scene-setting narration, stored on `Session.narrator_voice_id`.
-`_synthesize_line` passes explicit `voice_settings` (`config.TTS_STABILITY/TTS_STYLE/...`) —
-previously none were passed, so ElevenLabs fell back to each library voice's conservative stored
-defaults, which read as flat/robotic; another real live-usage complaint.
+gender *and* an expressiveness range (one batched call, `_infer_voice_traits`) and passes gender
+to ElevenLabs' `voices.search(gender=...)` — searching on role/traits text alone had no gender
+signal at all, a real bug found via live usage. `cast_narrator_voice()` separately casts one voice
+from the `narrative_story` use case for scene-setting narration, stored on
+`Session.narrator_voice_id`.
 
-`screenplay.build_screenplay()`'s cue-generation call also produces a short `narration` line per
-scene (read by the narrator, ahead of that scene's dialogue in `produce()`) and asks for 2-4 SFX
-cues per scene rather than an unspecified count — both added in response to feedback that scenes
-were hard to follow without context and felt sparse on sound design.
+**Performance carries forward across a scene, not per independent TTS call**: `DirectorAgent`
+emits an `intensity` value (0.0-1.0) on every turn's decision — not just this line in isolation,
+but how tense the *scene* has become — which lands on whichever `Event` that turn produces (see
+`_run_turns`). `production._scaled_voice_settings` scales a dialogue line's `voice_settings` off
+of that character's own baseline (`Character.voice_stability_base/voice_style_base`, set once in
+`cast_voices`) and their own `voice_range` (how far *that* character can swing before pushing
+expressiveness starts eroding what makes their specific voice recognizable — a real problem with
+one global setting for every voice) times the line's intensity — an absolute floor/ceiling
+(`config.TTS_STABILITY_FLOOR/TTS_STYLE_CEILING`) still applies regardless. `_pause_after` scales
+the inter-line silence the same way — a heated exchange gets short, talked-over-itself gaps; a
+calm one gets longer, more contemplative ones. Previously none of this existed: one flat
+`voice_settings` for every line/character, one fixed 250ms gap — flat, robotic delivery was a
+real live-usage complaint this replaces.
+
+`screenplay.build_screenplay()`'s cue-generation call produces a short `narration` line per scene
+(read by the narrator, ahead of that scene's dialogue in `produce()`), 2-4 SFX cues each paired
+with the *specific numbered line* they land at (`sfx_cue_positions` — a door slam plays when the
+door slams, not bunched at the top of the scene by default), and a `music_swell_line_index`
+marking the scene's emotional peak, where `produce()` briefly boosts the ducked underscore
+(`config.MUSIC_SWELL_WINDOW_MS/MUSIC_SWELL_BOOST_DB`) instead of one flat duck level throughout —
+added in response to feedback that scenes were hard to follow without context, felt sparse on
+sound design, and that pacing/timing decisions (not just dialogue) are real performance choices.
 
 TTS/SFX/music generation are parallelized via `asyncio.to_thread` over the synchronous ElevenLabs
-SDK calls. Mixing is scene-level, not per-line — a known simplification, not a bug. The
-transcript/screenplay are persisted *before* production starts specifically so a mid-production
-API failure never loses the (expensive) simulation result.
+SDK calls. Mixing is still scene-level, not sample-accurate — a known simplification, not a bug.
+The transcript/screenplay are persisted *before* production starts specifically so a
+mid-production API failure never loses the (expensive) simulation result.
 
 ### Data model (`models.py`)
 

@@ -60,7 +60,7 @@ def test_produce_run_calls_production_with_the_persisted_screenplay_and_voices(t
 
     captured = {}
 
-    async def fake_produce(screenplay, voice_by_name, out_dir, narrator_voice_id=None):
+    async def fake_produce(screenplay, voice_by_name, out_dir, narrator_voice_id=None, voice_settings_by_name=None):
         captured["voice_by_name"] = voice_by_name
         captured["narrator_voice_id"] = narrator_voice_id
         return tmp_path / "final_movie.mp3"
@@ -96,7 +96,7 @@ def test_play_is_generate_then_produce_run(temp_db, monkeypatch, tmp_path):
 
     from simstars.models import Screenplay
 
-    async def fake_produce(screenplay, voice_by_name, out_dir, narrator_voice_id=None):
+    async def fake_produce(screenplay, voice_by_name, out_dir, narrator_voice_id=None, voice_settings_by_name=None):
         return tmp_path / "final_movie.mp3"
 
     monkeypatch.setattr(pipeline, "simulate", fake_simulate)

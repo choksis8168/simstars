@@ -150,3 +150,58 @@ def test_add_cues_treats_an_empty_narration_string_as_none(monkeypatch):
     scenes = _add_cues([_scene()])
 
     assert scenes[0].narration is None
+
+
+def test_add_cues_attaches_sfx_positions_and_music_swell_index(monkeypatch):
+    monkeypatch.setattr(
+        "simstars.screenplay.call_structured",
+        lambda **kwargs: {
+            "scenes": [
+                {
+                    "scene_index": 0,
+                    "narration": "n",
+                    "sfx_cues": ["door slam"],
+                    "sfx_cue_positions": [2],
+                    "music_cue": "tense",
+                    "music_swell_line_index": 3,
+                }
+            ]
+        },
+    )
+    scenes = _add_cues([_scene()])
+
+    assert scenes[0].sfx_cue_positions == [2]
+    assert scenes[0].music_swell_line_index == 3
+
+
+def test_add_cues_accepts_a_null_music_swell_index_for_an_even_scene(monkeypatch):
+    monkeypatch.setattr(
+        "simstars.screenplay.call_structured",
+        lambda **kwargs: {
+            "scenes": [
+                {
+                    "scene_index": 0, "narration": "n", "sfx_cues": [], "sfx_cue_positions": [],
+                    "music_cue": "calm", "music_swell_line_index": None,
+                }
+            ]
+        },
+    )
+    scenes = _add_cues([_scene()])
+
+    assert scenes[0].music_swell_line_index is None
+
+
+def test_add_cues_prompt_gives_each_line_an_explicit_index(monkeypatch):
+    captured = {}
+
+    def fake_call_structured(**kwargs):
+        captured["user"] = kwargs["user"]
+        return {"scenes": []}
+
+    monkeypatch.setattr("simstars.screenplay.call_structured", fake_call_structured)
+    scene = _scene()
+    scene.lines = ["ANA: hi", "BEN: hey"]
+    _add_cues([scene])
+
+    assert "[0] ANA: hi" in captured["user"]
+    assert "[1] BEN: hey" in captured["user"]

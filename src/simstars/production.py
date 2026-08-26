@@ -2,11 +2,19 @@
 ElevenLabs, and final mixing via pydub. See docs/design.md "Production
 pipeline".
 
-Mixing is scene-level, not per-line, for v1: dialogue lines within a scene
-play back to back, a scene's SFX cues play at the top of the scene, and its
-music cue is ducked underneath the whole scene. That's a known
-simplification (no line-level timing/alignment yet) - good enough for a
-first listenable cut; tightening it is a natural v2 improvement.
+This is treated as an actual audio production, not a stitch of independent
+TTS calls: `Event.intensity` (set turn-by-turn by DirectorAgent - see
+simulation.py) carries emotional context forward across a scene so a line
+late in an escalating argument renders differently from the same
+character's first line, and the inter-line pause tightens as intensity
+rises; each character's own baseline stability/style (set once in
+cast_voices, alongside voice_id) keeps that scaling from eroding what makes
+*that* voice recognizable, since a global expressiveness setting pushed
+far enough can start to blur a specific voice into something generic;
+SFX/music cues are timestamped to a specific line (see screenplay.py's
+sfx_cue_positions/music_swell_line_index) rather than all firing at the
+top of the scene. Mixing is still scene-level, not sample-accurate - a
+known simplification, not a bug.
 """
 
 from __future__ import annotations
@@ -20,14 +28,22 @@ from pydub import AudioSegment
 
 from simstars.config import (
     MAX_CONCURRENT_ELEVENLABS_CALLS,
+    MUSIC_SWELL_BOOST_DB,
+    MUSIC_SWELL_WINDOW_MS,
+    PAUSE_MS_CALM,
+    PAUSE_MS_INTENSE,
     TTS_SIMILARITY_BOOST,
     TTS_STABILITY,
+    TTS_STABILITY_FLOOR,
+    TTS_STABILITY_SWING,
     TTS_STYLE,
+    TTS_STYLE_CEILING,
+    TTS_STYLE_SWING,
     VOICE_CASTING_MODEL,
     require_elevenlabs_key,
 )
 from simstars.llm import call_structured
-from simstars.models import Character, EventType, Screenplay
+from simstars.models import Character, Event, EventType, Screenplay
 from simstars.retry import with_retry
 
 _client: ElevenLabs | None = None
@@ -47,50 +63,62 @@ def _collect(chunks) -> bytes:
 # --- Voice casting (session-creation time, persisted, reused across regenerates) ---
 
 
-def _infer_genders(characters: list[Character]) -> dict[str, str]:
-    """One batched call inferring each character's likely voice gender from
-    name/role/traits, so cast_voices can filter ElevenLabs' voice search by
-    it. Real bug found via live usage: searching on role/traits text alone
-    gave the API no gender signal at all, so e.g. a character named "Travis"
-    could just as easily land a female-labeled voice as a male one - the
-    search had nothing to disambiguate on. "neutral" means genuinely
-    ambiguous or non-binary; cast_voices skips the gender filter for those
-    rather than forcing a guess.
+def _infer_voice_traits(characters: list[Character]) -> dict[str, dict]:
+    """One batched call inferring, per character: likely voice gender (so
+    cast_voices can filter ElevenLabs' voice search by it - real bug found
+    via live usage: searching on role/traits text alone gave the API no
+    gender signal at all, so e.g. a character named "Travis" could just as
+    easily land a female-labeled voice as a male one) and an expressiveness
+    range (0.0-1.0, how far this character's delivery can swing with a
+    scene's intensity before it stops sounding like *this* character - see
+    _scaled_voice_settings). "neutral" gender means genuinely ambiguous or
+    non-binary; cast_voices skips the gender filter for those rather than
+    forcing a guess. The expressiveness range is a reasonable heuristic
+    starting point from the character's traits, not something verified by
+    ear - it's meant to be a sane default, not a claim of acoustic testing.
     """
     roster = "\n".join(f"- {c.name}: role={c.role}, traits={c.traits}" for c in characters)
     result = call_structured(
         model=VOICE_CASTING_MODEL,
         system=(
-            "You infer the most likely voice gender for fictional characters, "
-            "for casting a text-to-speech voice - use naming convention as the "
-            "primary signal, role/traits as secondary."
+            "You infer two things about each fictional character, for casting "
+            "and tuning a text-to-speech voice: likely gender (naming "
+            "convention as the primary signal, role/traits as secondary), and "
+            "an expressiveness range from 0.0 to 1.0 - how far this "
+            "character's vocal delivery should be allowed to swing with a "
+            "scene's emotional intensity before it risks no longer sounding "
+            "like them. A volatile, hot-tempered, or dramatic character "
+            "tolerates a wide range (0.7-1.0); a controlled, reserved, or "
+            "deadpan character should keep a narrow one (0.1-0.3) so an "
+            "intense scene doesn't distort their core voice."
         ),
         user=(
             f"Characters:\n{roster}\n\n"
-            "For each character, decide 'male', 'female', or 'neutral' "
-            "(genuinely ambiguous or non-binary)."
+            "For each character, decide 'male'/'female'/'neutral' (genuinely "
+            "ambiguous or non-binary) and an expressiveness_range 0.0-1.0."
         ),
-        tool_name="infer_voice_genders",
-        tool_description="Infer each character's likely voice gender for TTS voice casting.",
+        tool_name="infer_voice_traits",
+        tool_description="Infer each character's likely voice gender and expressiveness range for TTS casting/tuning.",
         input_schema={
             "type": "object",
             "properties": {
-                "genders": {
+                "characters": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
                             "name": {"type": "string"},
                             "gender": {"type": "string", "enum": ["male", "female", "neutral"]},
+                            "expressiveness_range": {"type": "number"},
                         },
-                        "required": ["name", "gender"],
+                        "required": ["name", "gender", "expressiveness_range"],
                     },
                 }
             },
-            "required": ["genders"],
+            "required": ["characters"],
         },
     )
-    return {entry["name"]: entry["gender"] for entry in result["genders"]}
+    return {entry["name"]: entry for entry in result["characters"]}
 
 
 def cast_voices(characters: list[Character]) -> None:
@@ -102,14 +130,22 @@ def cast_voices(characters: list[Character]) -> None:
     fallback = [v.voice_id for v in client.voices.get_all().voices]
 
     try:
-        genders = _infer_genders(characters)
-    except Exception:  # noqa: BLE001 - gender matching is a nice-to-have, never blocks casting
-        genders = {}
+        traits_by_name = _infer_voice_traits(characters)
+    except Exception:  # noqa: BLE001 - a nice-to-have, never blocks casting
+        traits_by_name = {}
 
     for character in characters:
         query = f"{character.role} {character.traits}".strip()[:200]
-        gender = genders.get(character.name)
+        inferred = traits_by_name.get(character.name, {})
+        gender = inferred.get("gender")
         search_gender = gender if gender in ("male", "female") else None
+        # Baseline delivery + how far this character's own settings may
+        # swing with intensity (see _scaled_voice_settings) - defaults to
+        # the global constants/a middling range if inference failed, so
+        # casting never blocks on this.
+        character.voice_stability_base = TTS_STABILITY
+        character.voice_style_base = TTS_STYLE
+        character.voice_range = inferred.get("expressiveness_range", 0.5)
 
         def search(g=search_gender):
             return client.voices.search(search=query, gender=g, page_size=5)
@@ -158,11 +194,64 @@ def cast_narrator_voice() -> str:
     return candidates[0]
 
 
+# --- Per-line performance scaling (see Event.intensity, DirectorAgent) ---
+
+
+def _scaled_voice_settings(
+    stability_base: float, style_base: float, voice_range: float, intensity: float | None
+) -> VoiceSettings:
+    """Scales a character's own baseline delivery by this line's intensity
+    and that character's own expressiveness range, so a scene's emotional
+    arc actually builds across independently-generated TTS calls instead of
+    every line rendering at the same flat setting - and so an intense scene
+    pushes each character by *their own* tolerance, not one shared global
+    ceiling that can start eroding a specific voice's recognizability. An
+    absolute floor/ceiling (config.py) still applies regardless of
+    character/range, so a bad inference can't send ElevenLabs a value that
+    breaks synthesis entirely. intensity=None (untracked older data, or a
+    non-tracked caller) renders at exactly the character's own baseline.
+    """
+    i = 0.0 if intensity is None else max(0.0, min(1.0, intensity))
+    stability = max(TTS_STABILITY_FLOOR, stability_base - i * voice_range * TTS_STABILITY_SWING)
+    style = min(TTS_STYLE_CEILING, style_base + i * voice_range * TTS_STYLE_SWING)
+    return VoiceSettings(stability=stability, similarity_boost=TTS_SIMILARITY_BOOST, style=style, use_speaker_boost=True)
+
+
+def _voice_settings_for_event(event: Event, voice_settings_by_name: dict[str, dict]) -> VoiceSettings:
+    settings = voice_settings_by_name.get(event.actor, {})
+    return _scaled_voice_settings(
+        settings.get("stability_base", TTS_STABILITY),
+        settings.get("style_base", TTS_STYLE),
+        settings.get("range", 0.5),
+        event.intensity,
+    )
+
+
+def _pause_after(intensity: float | None) -> int:
+    """Milliseconds of silence after a line - a heated exchange should feel
+    like it's talking over itself, not pause the same fixed beat a calm one
+    would. intensity=None falls back to the middle of the range, matching
+    the flat gap this used to always be.
+    """
+    i = 0.5 if intensity is None else max(0.0, min(1.0, intensity))
+    return int(PAUSE_MS_CALM - i * (PAUSE_MS_CALM - PAUSE_MS_INTENSE))
+
+
 # --- Per-clip generation (parallelized across a run) ---
 
 
-async def _synthesize_line(text: str, voice_id: str, limiter: asyncio.Semaphore) -> bytes:
+async def _synthesize_line(
+    text: str, voice_id: str, limiter: asyncio.Semaphore, voice_settings: VoiceSettings | None = None
+) -> bytes:
     client = _get_client()
+    # Library voices default to conservative stored settings when none are
+    # passed - flat, monotonous line readings were a real complaint from
+    # live usage. Callers with per-character/per-line context (produce())
+    # pass a scaled VoiceSettings (see _scaled_voice_settings); anything
+    # else (narration) falls back to the flat global defaults.
+    settings = voice_settings or VoiceSettings(
+        stability=TTS_STABILITY, similarity_boost=TTS_SIMILARITY_BOOST, style=TTS_STYLE, use_speaker_boost=True
+    )
 
     def call():
         return _collect(
@@ -171,16 +260,7 @@ async def _synthesize_line(text: str, voice_id: str, limiter: asyncio.Semaphore)
                 text=text,
                 model_id="eleven_multilingual_v2",
                 output_format="mp3_44100_128",
-                # Library voices default to conservative stored settings
-                # when no voice_settings are passed - flat, monotonous line
-                # readings were a real complaint from live usage. See
-                # config.py for what these values do.
-                voice_settings=VoiceSettings(
-                    stability=TTS_STABILITY,
-                    similarity_boost=TTS_SIMILARITY_BOOST,
-                    style=TTS_STYLE,
-                    use_speaker_boost=True,
-                ),
+                voice_settings=settings,
             )
         )
 
@@ -233,6 +313,7 @@ async def produce(
     voice_by_name: dict[str, str],
     out_dir: Path,
     narrator_voice_id: str | None = None,
+    voice_settings_by_name: dict[str, dict] | None = None,
 ) -> Path:
     # Shared across the whole call (not one per gather()) so dialogue and
     # SFX bursts within a scene both draw from the same budget - see
@@ -241,6 +322,7 @@ async def produce(
     # created in, and produce() may run under a fresh asyncio.run() each
     # call (see pipeline.play()).
     limiter = asyncio.Semaphore(MAX_CONCURRENT_ELEVENLABS_CALLS)
+    voice_settings_by_name = voice_settings_by_name or {}
     scene_segments: list[AudioSegment] = []
 
     for scene_index, scene in enumerate(screenplay.scenes):
@@ -255,37 +337,76 @@ async def produce(
             narration_track = _bytes_to_segment(narration_bytes) + AudioSegment.silent(400)
 
         # dialogue lines, back to back, throttled to at most
-        # MAX_CONCURRENT_ELEVENLABS_CALLS in flight at once
+        # MAX_CONCURRENT_ELEVENLABS_CALLS in flight at once - each rendered
+        # with that line's own scaled voice_settings (character baseline +
+        # this beat's intensity), not one flat setting for every line.
         dialogue_events = [e for e in scene.events if e.type == EventType.DIALOGUE]
         dialogue_bytes = await asyncio.gather(
             *[
-                _synthesize_line(e.content, voice_by_name.get(e.actor, next(iter(voice_by_name.values()))), limiter)
+                _synthesize_line(
+                    e.content,
+                    voice_by_name.get(e.actor, next(iter(voice_by_name.values()))),
+                    limiter,
+                    _voice_settings_for_event(e, voice_settings_by_name),
+                )
                 for e in dialogue_events
             ]
         )
+
+        # Walk every event (not just dialogue) so sfx_cue_positions/
+        # music_swell_line_index - indexed against scene.lines/scene.events,
+        # what screenplay._add_cues actually saw - land on the right
+        # moment. Non-dialogue events don't advance the timeline (nothing
+        # is synthesized for them); they just record "wherever we are right
+        # now" so a cue attached to an action/movement/director line still
+        # resolves to a sensible position.
         dialogue_track = AudioSegment.silent(300)
-        for i, data in enumerate(dialogue_bytes):
-            path = out_dir / f"scene{scene_index}_line{i}.mp3"
-            path.write_bytes(data)
-            dialogue_track += _bytes_to_segment(data) + AudioSegment.silent(250)
+        line_positions_ms: list[int] = []  # one per scene.events/scene.lines entry
+        dialogue_bytes_iter = iter(dialogue_bytes)
+        dialogue_line_num = 0
+        for event in scene.events:
+            if event.type == EventType.DIALOGUE:
+                data = next(dialogue_bytes_iter)
+                (out_dir / f"scene{scene_index}_line{dialogue_line_num}.mp3").write_bytes(data)
+                dialogue_line_num += 1
+                dialogue_track += _bytes_to_segment(data)
+                line_positions_ms.append(len(dialogue_track))
+                dialogue_track += AudioSegment.silent(_pause_after(event.intensity))
+            else:
+                line_positions_ms.append(len(dialogue_track))
 
+        narration_len = len(narration_track)
         dialogue_track = narration_track + dialogue_track
+        line_positions_ms = [pos + narration_len for pos in line_positions_ms]
 
-        # SFX, same throttling, laid at the top of the scene (narration included)
+        # SFX, same throttling, each placed at its cued line's position
+        # rather than all bunched at the top of the scene.
         sfx_bytes = await asyncio.gather(*[_generate_sfx(cue, limiter) for cue in scene.sfx_cues])
         sfx_track = AudioSegment.silent(len(dialogue_track))
         for i, data in enumerate(sfx_bytes):
-            if data:
-                sfx_track = sfx_track.overlay(_bytes_to_segment(data), position=0)
+            if not data:
+                continue
+            line_idx = scene.sfx_cue_positions[i] if i < len(scene.sfx_cue_positions) else 0
+            position_ms = line_positions_ms[line_idx] if 0 <= line_idx < len(line_positions_ms) else 0
+            sfx_track = sfx_track.overlay(_bytes_to_segment(data), position=position_ms)
 
         scene_audio = dialogue_track.overlay(sfx_track)
 
-        # music, ducked under the whole scene
+        # music, ducked under the whole scene, briefly swelling at the
+        # scene's marked emotional peak (if any) rather than sitting at one
+        # flat ducked level throughout.
         if scene.music_cue:
             music_bytes = await _generate_music(scene.music_cue, len(scene_audio), limiter)
             if music_bytes:
-                music_track = _bytes_to_segment(music_bytes) - 18  # dB, ducked under dialogue
-                music_track = music_track[: len(scene_audio)]
+                music_track = (_bytes_to_segment(music_bytes) - 18)[: len(scene_audio)]  # dB, ducked under dialogue
+                swell_idx = scene.music_swell_line_index
+                if swell_idx is not None and 0 <= swell_idx < len(line_positions_ms):
+                    center = line_positions_ms[swell_idx]
+                    start = max(0, center - MUSIC_SWELL_WINDOW_MS // 2)
+                    end = min(len(music_track), center + MUSIC_SWELL_WINDOW_MS // 2)
+                    music_track = (
+                        music_track[:start] + (music_track[start:end] + MUSIC_SWELL_BOOST_DB) + music_track[end:]
+                    )
                 scene_audio = scene_audio.overlay(music_track)
 
         scene_segments.append(scene_audio)

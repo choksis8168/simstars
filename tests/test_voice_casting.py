@@ -58,11 +58,13 @@ def no_op_gender_inference(monkeypatch):
     """Most tests here care about search()'s behavior given a known gender
     mapping, not the LLM call that produces it - patched separately in the
     tests that do care about it."""
-    monkeypatch.setattr(production, "_infer_genders", lambda characters: {})
+    monkeypatch.setattr(production, "_infer_voice_traits", lambda characters: {})
 
 
 def test_cast_voices_passes_the_inferred_gender_to_search(monkeypatch):
-    monkeypatch.setattr(production, "_infer_genders", lambda characters: {"Travis": "male"})
+    monkeypatch.setattr(
+        production, "_infer_voice_traits", lambda characters: {"Travis": {"gender": "male", "expressiveness_range": 0.6}}
+    )
     voices_client = FakeVoicesClient({"male": _FakeSearchResult(["voice-m1"])}, fallback_ids=["fallback-1"])
     monkeypatch.setattr(production, "_get_client", lambda: FakeClient(voices_client))
 
@@ -71,6 +73,31 @@ def test_cast_voices_passes_the_inferred_gender_to_search(monkeypatch):
 
     assert voices_client.calls[0]["gender"] == "male"
     assert characters[0].voice_id == "voice-m1"
+
+
+def test_cast_voices_sets_per_character_voice_tuning_fields(monkeypatch):
+    monkeypatch.setattr(
+        production, "_infer_voice_traits", lambda characters: {"Travis": {"gender": "male", "expressiveness_range": 0.8}}
+    )
+    voices_client = FakeVoicesClient({"male": _FakeSearchResult(["voice-m1"])}, fallback_ids=["fallback-1"])
+    monkeypatch.setattr(production, "_get_client", lambda: FakeClient(voices_client))
+
+    characters = [_character("Travis")]
+    production.cast_voices(characters)
+
+    assert characters[0].voice_range == 0.8
+    assert characters[0].voice_stability_base is not None
+    assert characters[0].voice_style_base is not None
+
+
+def test_cast_voices_defaults_voice_range_when_inference_omits_it(no_op_gender_inference, monkeypatch):
+    voices_client = FakeVoicesClient({None: _FakeSearchResult(["voice-x"])}, fallback_ids=["fallback-1"])
+    monkeypatch.setattr(production, "_get_client", lambda: FakeClient(voices_client))
+
+    characters = [_character("Ash")]
+    production.cast_voices(characters)
+
+    assert characters[0].voice_range == 0.5
 
 
 def test_cast_voices_skips_the_gender_filter_for_neutral_or_unknown(no_op_gender_inference, monkeypatch):
@@ -85,7 +112,9 @@ def test_cast_voices_skips_the_gender_filter_for_neutral_or_unknown(no_op_gender
 
 
 def test_cast_voices_retries_without_gender_when_the_gendered_search_is_empty(monkeypatch):
-    monkeypatch.setattr(production, "_infer_genders", lambda characters: {"Katelyn": "female"})
+    monkeypatch.setattr(
+        production, "_infer_voice_traits", lambda characters: {"Katelyn": {"gender": "female", "expressiveness_range": 0.5}}
+    )
     voices_client = FakeVoicesClient(
         {"female": _FakeSearchResult([]), None: _FakeSearchResult(["voice-general"])},
         fallback_ids=["fallback-1"],
@@ -114,11 +143,11 @@ def test_cast_voices_falls_back_to_the_full_library_when_search_errors(no_op_gen
     assert characters[0].voice_id == "fallback-1"
 
 
-def test_cast_voices_never_blocks_on_gender_inference_failing(monkeypatch):
+def test_cast_voices_never_blocks_on_voice_trait_inference_failing(monkeypatch):
     def boom(characters):
         raise RuntimeError("model call failed")
 
-    monkeypatch.setattr(production, "_infer_genders", boom)
+    monkeypatch.setattr(production, "_infer_voice_traits", boom)
     voices_client = FakeVoicesClient({None: _FakeSearchResult(["voice-x"])}, fallback_ids=["fallback-1"])
     monkeypatch.setattr(production, "_get_client", lambda: FakeClient(voices_client))
 
@@ -126,6 +155,7 @@ def test_cast_voices_never_blocks_on_gender_inference_failing(monkeypatch):
     production.cast_voices(characters)  # must not raise
 
     assert characters[0].voice_id == "voice-x"
+    assert characters[0].voice_range == 0.5  # falls back to a sane default
 
 
 def test_cast_voices_avoids_duplicate_voices_within_the_cast(no_op_gender_inference, monkeypatch):

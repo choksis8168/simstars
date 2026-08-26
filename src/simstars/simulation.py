@@ -235,7 +235,14 @@ _DIRECTOR_SYSTEM = (
     "until a character speaks it. If you want a phone call to reveal "
     "who's calling, the event is just 'the phone rings' - the caller's "
     "identity only becomes real once a character reads it and says it "
-    "out loud on a later turn."
+    "out loud on a later turn.\n\n"
+    "Every turn also carries an 'intensity' value (0.0-1.0) tracking how "
+    "emotionally charged the scene has become - not per line in isolation, "
+    "but the arc of the scene so far. This becomes real vocal performance "
+    "in production (delivery and pacing both key off it), so it needs to "
+    "actually build across an escalating exchange rather than resetting "
+    "each turn, and actually drop after a blowup or a resolution rather "
+    "than staying pinned high out of habit."
 )  # fully static across every call, every session - see cache_control below
 
 
@@ -358,8 +365,20 @@ class DirectorAgent:
                         "type": "string",
                         "description": "Required if action == cut: why the story is complete.",
                     },
+                    "intensity": {
+                        "type": "number",
+                        "description": (
+                            "0.0 (calm) to 1.0 (peak emotional intensity) for the beat you're "
+                            "choosing right now, tracking how tense/heated this scene has become "
+                            "so far - not just this one line in isolation. A scene escalating "
+                            "toward a confrontation should climb turn over turn, not reset; a "
+                            "quiet beat after a blowup should drop back down. This shapes vocal "
+                            "delivery and pacing in production, so be honest about where the "
+                            "scene actually is emotionally, not just this line's surface content."
+                        ),
+                    },
                 },
-                "required": ["action"],
+                "required": ["action", "intensity"],
             },
         )
 
@@ -384,6 +403,10 @@ def _run_turns(
         turns_remaining = max_turns - turn + 1
         decision = director.decide_turn(state, turn, turns_remaining, producer_note, prior_feedback)
         action = decision["action"]
+        # Captured before the backstop below can replace `decision` wholesale
+        # - the director's read on this turn's emotional intensity is still
+        # meaningful even when the backstop overrides *who* acts.
+        intensity = decision.get("intensity")
 
         # Mechanical backstop for the reveals-only-in-unvoiced-events failure
         # mode (see docs/design.md verification notes): prompting the director
@@ -434,6 +457,7 @@ def _run_turns(
                 target=decision.get("target"),
             )
 
+        event.intensity = intensity
         state.apply_event(event)
 
     return None

@@ -287,10 +287,23 @@ def produce_run(run_id: str) -> Run:
 
     session, characters = _load_session(run.session_id)
     voice_by_name = {c.name: c.voice_id for c in characters if c.voice_id}
+    # Per-character baseline delivery + expressiveness range (set once in
+    # cast_voices, alongside voice_id) - lets production.py scale each
+    # line's TTS settings off of that specific character rather than one
+    # global setting for the whole cast. Missing for a character cast
+    # before this existed - production.py falls back to the global
+    # defaults for those, same as always.
+    voice_settings_by_name = {
+        c.name: {"stability_base": c.voice_stability_base, "style_base": c.voice_style_base, "range": c.voice_range}
+        for c in characters
+        if c.voice_stability_base is not None
+    }
     screenplay = Screenplay.model_validate_json(run.screenplay_json)
 
     out_dir = audio_dir(run.session_id, run.id)
-    final_path = asyncio.run(production.produce(screenplay, voice_by_name, out_dir, session.narrator_voice_id))
+    final_path = asyncio.run(
+        production.produce(screenplay, voice_by_name, out_dir, session.narrator_voice_id, voice_settings_by_name)
+    )
 
     run.final_audio_path = str(final_path)
     with get_session() as db:

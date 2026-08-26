@@ -50,6 +50,30 @@ TTS_STABILITY = 0.35
 TTS_SIMILARITY_BOOST = 0.75
 TTS_STYLE = 0.45
 
+# Per-line performance: how far a character's own baseline stability/style
+# (Character.voice_stability_base/voice_style_base, set in cast_voices) can
+# swing with that line's Event.intensity (0.0-1.0), scaled by the
+# character's own voice_range - see production._scaled_voice_settings. A
+# line at intensity 0 always renders at exactly the character's baseline;
+# intensity 1.0 for a full-voice_range character swings the full amount
+# below. Floor/ceiling are an absolute clamp regardless of character/range,
+# so a bug or an extreme cast still can't send ElevenLabs a nonsense value.
+TTS_STABILITY_SWING = 0.25
+TTS_STYLE_SWING = 0.35
+TTS_STABILITY_FLOOR = 0.05
+TTS_STYLE_CEILING = 0.95
+
+# Inter-line pause: a heated exchange should feel like it's talked over
+# itself, not pause the same beat every time - see production._pause_after.
+PAUSE_MS_CALM = 400
+PAUSE_MS_INTENSE = 100
+
+# Music swell: how long the underscore briefly comes up out of its ducked
+# level around a scene's marked peak (Scene.music_swell_line_index), and by
+# how much - see production.produce.
+MUSIC_SWELL_WINDOW_MS = 3000
+MUSIC_SWELL_BOOST_DB = 10
+
 # Scope guardrails (cost/complexity control)
 MIN_CHARACTERS = 3
 MAX_CHARACTERS = 5
