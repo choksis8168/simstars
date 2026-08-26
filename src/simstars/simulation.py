@@ -245,9 +245,15 @@ class DirectorAgent:
     toward a resolution beat instead of just getting cut off.
     """
 
-    def __init__(self, session: Session, characters: list[Character]):
+    def __init__(self, session: Session, characters: list[Character], outline: str | None = None):
         self.session = session
         self.characters = characters
+        # Pre-generation beat sketch (see outline.py) - guidance only,
+        # director-only (matches the same omniscience boundary hidden
+        # secrets/wounds/goals already get; characters never see this).
+        # Fixed for the whole run, so it lives in the cached prefix below
+        # alongside world/forcing-mechanic, not the per-turn volatile part.
+        self.outline = outline
 
     def decide_turn(
         self,
@@ -290,17 +296,26 @@ class DirectorAgent:
             if prior_feedback
             else ""
         )
-        # Cached block: only world/forcing-mechanic/locations (fixed for the
-        # whole session) and the transcript itself (append-only - grows by
-        # exactly what the previous call didn't have yet). Turn-count and
-        # cast_summary (character *locations* can change turn to turn) are
-        # kept OUT of this block and appended after, uncached - mixing
-        # per-call-varying text into the cached prefix would invalidate the
-        # cache on every single call instead of extending it.
+        outline_block = (
+            f"Intended dramatic arc for this run (guidance from a story editor, not a "
+            f"script - steer toward this, but let exactly how it plays out emerge through "
+            f"actual dialogue; deviate if the story you're actually getting calls for it):\n"
+            f"{self.outline}\n\n"
+            if self.outline
+            else ""
+        )
+        # Cached block: only world/forcing-mechanic/locations/outline (all
+        # fixed for the whole run) and the transcript itself (append-only -
+        # grows by exactly what the previous call didn't have yet). Turn-
+        # count and cast_summary (character *locations* can change turn to
+        # turn) are kept OUT of this block and appended after, uncached -
+        # mixing per-call-varying text into the cached prefix would
+        # invalidate the cache on every single call instead of extending it.
         cacheable_context = (
             f"World: {self.session.world_description}\n"
             f"Forcing mechanic: {self.session.forcing_mechanic}\n"
             f"Locations: {', '.join(self.session.location_list())}\n\n"
+            f"{outline_block}"
             f"Full transcript so far:\n{_format_log(state.events)}"
         )
         volatile_context = (
@@ -681,6 +696,7 @@ async def simulate(
     characters: list[Character],
     max_turns: int,
     producer_note: str | None = None,
+    outline: str | None = None,
 ) -> tuple[list[Event], EndReason, int]:
     """GENERATE phase, structured as branching lookahead over segments (see
     docs/design.md follow-on plan "Story-Quality Variance Fix") and run as a
@@ -693,13 +709,17 @@ async def simulate(
     it derails the whole run, rather than only judging the finished
     transcript after the fact.
 
+    `outline` is the pre-generation beat sketch from outline.py (see its
+    module docstring) - passed straight through to DirectorAgent, which is
+    the only place it's read; CharacterAgent never sees it.
+
     Returns (events, end_reason, branch_rounds_used) - the extra int is how
     many times a segment needed a re-preview round because even the best
     candidate was still judged flat (observability signal persisted on Run).
     """
     initial_state: _SimState = {
         "world_state": WorldState.initial(characters),
-        "director": DirectorAgent(session, characters),
+        "director": DirectorAgent(session, characters, outline),
         "agents": {c.name: CharacterAgent(c, session) for c in characters},
         "max_turns": max_turns,
         "producer_note": producer_note,

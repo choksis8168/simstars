@@ -27,6 +27,7 @@ from simstars.db import audio_dir, get_session, run_dir
 from simstars.enrichment import enrich_session
 from simstars.llm import estimated_cost_usd, reset_usage_tracking, usage_snapshot
 from simstars.models import Character, EndReason, Event, Run, Screenplay, Session
+from simstars.outline import generate_outline
 from simstars.screenplay import build_screenplay
 from simstars.simulation import simulate
 
@@ -195,6 +196,12 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
     # on why this is a ContextVar rather than a plain global.
     reset_usage_tracking()
 
+    # One outline for the whole generate() call, not one per retry attempt
+    # - the intended shape shouldn't change just because an earlier attempt
+    # got rerolled (see outline.py). Persisted on the Run for visibility -
+    # if a story doesn't land, this is the first thing worth checking.
+    outline = generate_outline(session, characters, producer_note)
+
     # Every attempt is kept, not just the last one - see docs/design.md
     # follow-on plan: the previous version of this loop only ever shipped
     # whichever attempt ran *last* on exhaustion, not whichever actually
@@ -206,7 +213,9 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
         turn_budget = random.randint(MIN_TURN_BUDGET, MAX_TURN_BUDGET)
         attempts += 1
         try:
-            events, end_reason, rounds_used = asyncio.run(simulate(session, characters, turn_budget, producer_note))
+            events, end_reason, rounds_used = asyncio.run(
+                simulate(session, characters, turn_budget, producer_note, outline)
+            )
         except Exception:
             # A hard failure (e.g. every branch in some segment failed even
             # after call_structured's own retries - see llm.py/retry.py)
@@ -241,6 +250,7 @@ def generate(session_id: str, producer_note: str | None = None) -> tuple[Run, li
         critic_attempts=attempts,
         critic_reasoning=best_grade.get("reasoning"),
         branch_rounds_used=best_rounds,
+        outline=outline,
         transcript_json=json.dumps([e.model_dump(mode="json") for e in best_events]),
         screenplay_json=screenplay.model_dump_json(),
         llm_calls=total_calls,

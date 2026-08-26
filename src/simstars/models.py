@@ -111,6 +111,7 @@ class Run(SQLModel, table=True):
     critic_attempts: int = 0
     critic_reasoning: Optional[str] = None  # reasoning from the winning attempt's grade - debugging visibility
     branch_rounds_used: int = 0  # total re-preview rounds across all segments (see simulation.simulate)
+    outline: Optional[str] = None  # pre-generation beat sketch fed to the director - see outline.py
 
     # Anthropic usage across every attempt this generate() call made (not
     # just the winning one - discarded attempts/branches still cost real

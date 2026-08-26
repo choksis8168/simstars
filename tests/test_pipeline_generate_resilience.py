@@ -14,6 +14,14 @@ from simstars.db import get_session
 from simstars.models import Character, EndReason, Event, EventType, Screenplay, Session
 
 
+@pytest.fixture(autouse=True)
+def _no_real_outline_call(monkeypatch):
+    # generate() makes one outline.generate_outline() call before the retry
+    # loop (see pipeline.py) - not what these hard-failure-retry tests are
+    # about, so it's stubbed out for the whole file rather than per test.
+    monkeypatch.setattr(pipeline, "generate_outline", lambda session, characters, note: "outline")
+
+
 def _seed_session() -> Session:
     session = Session(world_description="A test world", locations="Kitchen, Lobby", forcing_mechanic="stuck")
     with get_session() as db:
@@ -46,7 +54,7 @@ def _make_flaky_simulate(fail_times: int):
     """Raises for the first `fail_times` calls, then succeeds."""
     state = {"calls": 0}
 
-    async def fake(session, characters, turn_budget, note):
+    async def fake(session, characters, turn_budget, note, outline=None):
         state["calls"] += 1
         if state["calls"] <= fail_times:
             raise RuntimeError(f"simulated hard failure #{state['calls']}")

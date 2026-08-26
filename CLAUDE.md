@@ -78,10 +78,11 @@ new_session()  characters + world -> enrichment.py (hidden secrets/wounds/goals,
                mechanic) -> production.cast_voices() (ElevenLabs voice assigned per character,
                persisted, reused across regenerates) -> persisted Session/Character rows
 
-generate()     simulation.simulate() (GENERATE) -> critic.evaluate() (grade) -> reroll on
+generate()     outline.generate_outline() (once per call, not per retry attempt) ->
+               simulation.simulate() (GENERATE) -> critic.evaluate() (grade) -> reroll on
                failure up to MAX_CRITIC_RETRIES -> _select_best_attempt() picks the
                highest-scoring attempt (not just the last one tried) -> screenplay.build_screenplay()
-               -> persisted Run row (transcript_json/screenplay_json filled, no audio yet)
+               -> persisted Run row (transcript_json/screenplay_json/outline filled, no audio yet)
 
 play()         generate() -> production.produce() (TTS + SFX + music + mixing) -> final_audio_path
 ```
@@ -104,6 +105,13 @@ play()         generate() -> production.produce() (TTS + SFX + music + mixing) -
   (see docs/design.md verification notes), not a hypothetical. There's also a mechanical
   backstop in `_run_turns`: the turn immediately after a director-injected event is force-routed
   to a witnessing character, regardless of what the director's own decision said.
+- **Pre-generation outline (`outline.py`)**: before `simulate()` runs a single turn, one Sonnet
+  call sketches a rough 3-5 beat dramatic arc from the cast's hidden secrets/wounds/goals - not a
+  script, just guidance fed into `DirectorAgent`'s cached prompt context (director-only, same
+  omniscience boundary as hidden material - `CharacterAgent` never sees it). Exists because
+  branching/critic both only react to flatness *after* something was generated; this gives the
+  director something to steer toward from turn one instead of discovering a shape only through
+  trial. One outline per `generate()` call, not per retry attempt - persisted on `Run.outline`.
 - **Branching lookahead, orchestrated as a LangGraph `StateGraph`**: `simulate()` doesn't generate
   linearly. The turn budget is grouped into segments (`SEGMENT_LENGTH`); at each boundary,
   `BRANCH_FACTOR` short previews (`PREVIEW_LENGTH` turns, not the full segment — keeps cost down)

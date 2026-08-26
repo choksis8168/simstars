@@ -32,7 +32,7 @@ def _passing_grade():
 def test_generate_persists_usage_and_cost_on_the_run(temp_db, monkeypatch):
     session = _seed_session()
 
-    async def fake_simulate(session_, characters, turn_budget, note):
+    async def fake_simulate(session_, characters, turn_budget, note, outline=None):
         events = [Event(index=1, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="hi")]
         return events, EndReason.RESOLVED, 0
 
@@ -45,6 +45,7 @@ def test_generate_persists_usage_and_cost_on_the_run(temp_db, monkeypatch):
     monkeypatch.setattr(pipeline, "simulate", fake_simulate)
     monkeypatch.setattr(pipeline, "evaluate", lambda events, end_reason: _passing_grade())
     monkeypatch.setattr(pipeline, "build_screenplay", lambda events: Screenplay(scenes=[]))
+    monkeypatch.setattr(pipeline, "generate_outline", lambda session, characters, note: "outline")
     monkeypatch.setattr(pipeline, "reset_usage_tracking", lambda: reset_calls.append(True))
     monkeypatch.setattr(pipeline, "usage_snapshot", lambda: fake_snapshot)
     monkeypatch.setattr(pipeline, "estimated_cost_usd", lambda snapshot: 0.42)

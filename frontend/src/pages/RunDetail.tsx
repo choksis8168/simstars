@@ -84,6 +84,13 @@ export function RunDetail() {
         </div>
       ))}
 
+      {run.outline && (
+        <details className="critic-reasoning">
+          <summary>Intended story arc</summary>
+          <p style={{ whiteSpace: 'pre-line' }}>{run.outline}</p>
+        </details>
+      )}
+
       {run.critic_reasoning && (
         <details className="critic-reasoning">
           <summary>Critic reasoning</summary>

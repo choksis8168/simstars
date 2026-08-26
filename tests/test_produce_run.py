@@ -83,7 +83,7 @@ def test_play_is_generate_then_produce_run(temp_db, monkeypatch, tmp_path):
     refactor didn't change play()'s externally-visible behavior."""
     session = _seed_session_and_character()
 
-    async def fake_simulate(session_, characters, turn_budget, note):
+    async def fake_simulate(session_, characters, turn_budget, note, outline=None):
         from simstars.models import EndReason, Event, EventType
 
         return [Event(index=1, type=EventType.DIALOGUE, actor="Ana", location="Kitchen", content="hi")], EndReason.RESOLVED, 0
@@ -102,6 +102,7 @@ def test_play_is_generate_then_produce_run(temp_db, monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "simulate", fake_simulate)
     monkeypatch.setattr(pipeline, "evaluate", fake_evaluate)
     monkeypatch.setattr(pipeline, "build_screenplay", lambda events: Screenplay(scenes=[]))
+    monkeypatch.setattr(pipeline, "generate_outline", lambda session, characters, note: "outline")
     monkeypatch.setattr(pipeline.production, "produce", fake_produce)
 
     run = pipeline.play(session.id)
